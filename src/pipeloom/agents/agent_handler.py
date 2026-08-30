@@ -1,7 +1,9 @@
 import asyncio
+from dataclasses import dataclass
 from typing import Optional, Type
 
 from a2a.client import Client, create_client
+from google.protobuf import json_format
 from pydantic import BaseModel, ValidationError
 
 from pipeloom.core import Handler, step
@@ -19,6 +21,15 @@ from pipeloom.agents.a2a_client import (
 )
 from pipeloom.agents.exceptions import AgentCallFailed, AttemptFailed
 from pipeloom.agents.retry import RetryPolicy, compute_backoff_delay
+
+
+@dataclass
+class AgentCallMetrics:
+    calls: int = 0
+    total_attempts: int = 0
+    successes: int = 0
+    failures: int = 0
+    last_usage: Optional[dict] = None
 
 
 class AgentHandler(Handler):
@@ -43,6 +54,7 @@ class AgentHandler(Handler):
         self._retry_policy = retry_policy or RetryPolicy()
         self._output_schema = output_schema
         self._client = client
+        self.metrics = AgentCallMetrics()
 
     async def _get_client(self) -> Client:
         if self._client is None:
@@ -63,6 +75,8 @@ class AgentHandler(Handler):
         if state in RETRYABLE_TASK_STATES:
             raise AttemptFailed(reason=STATE_REASONS[state])
 
+        self.metrics.last_usage = self._extract_usage(task)
+
         result = extract_output(task)
         if self._output_schema is not None:
             try:
@@ -72,14 +86,29 @@ class AgentHandler(Handler):
             return validated.model_dump()
         return result
 
+    @staticmethod
+    def _extract_usage(task) -> Optional[dict]:
+        """Best-effort: agents that report usage/cost do so as an ad hoc
+        "usage" key in the Task's generic metadata Struct — there is no
+        standardized A2A field for this. Returns None if absent."""
+        if not task.HasField("metadata"):
+            return None
+        metadata = json_format.MessageToDict(task.metadata)
+        return metadata.get("usage")
+
     async def _invoke(self, payload: dict) -> dict:
+        self.metrics.calls += 1
         attempt = 0
         reason = "timeout"
         while True:
             attempt += 1
+            self.metrics.total_attempts += 1
             try:
-                return await self._attempt(payload)
+                result = await self._attempt(payload)
+                self.metrics.successes += 1
+                return result
             except AgentCallFailed:
+                self.metrics.failures += 1
                 raise
             except AttemptFailed as exc:
                 reason = exc.reason
@@ -88,6 +117,7 @@ class AgentHandler(Handler):
             except Exception:
                 reason = "timeout"
             if attempt >= self._retry_policy.max_attempts:
+                self.metrics.failures += 1
                 raise AgentCallFailed(
                     reason=reason,
                     message=f"Agent call did not succeed after {attempt} attempt(s); last reason: {reason}",

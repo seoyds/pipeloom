@@ -130,3 +130,69 @@ async def test_call_raises_agent_call_failed_when_stream_never_reaches_terminal_
         await handler.call(RawRecord(value={}, time=0.0))
 
     assert exc_info.value.reason == "no_terminal_state"
+
+
+@pytest.mark.asyncio
+async def test_metrics_track_calls_attempts_and_outcomes_on_success():
+    client = FakeClient([
+        [task_event(TaskState.TASK_STATE_FAILED)],
+        [task_event(TaskState.TASK_STATE_COMPLETED, artifacts=[text_artifact('{"ok": true}')])],
+    ])
+    handler = AgentHandler(
+        agent_url="https://example.invalid/agent", client=client, retry_policy=_fast_retry_policy(3)
+    )
+
+    await handler.call(RawRecord(value={}, time=0.0))
+
+    assert handler.metrics.calls == 1
+    assert handler.metrics.total_attempts == 2
+    assert handler.metrics.successes == 1
+    assert handler.metrics.failures == 0
+
+
+@pytest.mark.asyncio
+async def test_metrics_track_failures_when_retries_are_exhausted():
+    client = FakeClient([[task_event(TaskState.TASK_STATE_FAILED)]])
+    handler = AgentHandler(
+        agent_url="https://example.invalid/agent", client=client, retry_policy=_fast_retry_policy(2)
+    )
+
+    with pytest.raises(AgentCallFailed):
+        await handler.call(RawRecord(value={}, time=0.0))
+
+    assert handler.metrics.calls == 1
+    assert handler.metrics.total_attempts == 2
+    assert handler.metrics.successes == 0
+    assert handler.metrics.failures == 1
+
+
+@pytest.mark.asyncio
+async def test_metrics_reads_usage_from_task_metadata_when_present():
+    from google.protobuf import json_format
+    from google.protobuf.struct_pb2 import Struct
+    from a2a.types import StreamResponse, Task, TaskStatus
+
+    usage_struct = Struct()
+    json_format.ParseDict({"usage": {"input_tokens": 12, "output_tokens": 5}}, usage_struct)
+    task = Task(
+        id="t1",
+        status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED),
+        artifacts=[text_artifact('{"ok": true}')],
+        metadata=usage_struct,
+    )
+    client = FakeClient([[StreamResponse(task=task)]])
+    handler = AgentHandler(agent_url="https://example.invalid/agent", client=client)
+
+    await handler.call(RawRecord(value={}, time=0.0))
+
+    assert handler.metrics.last_usage == {"input_tokens": 12, "output_tokens": 5}
+
+
+@pytest.mark.asyncio
+async def test_metrics_last_usage_is_none_when_no_usage_metadata_present():
+    client = FakeClient([[task_event(TaskState.TASK_STATE_COMPLETED, artifacts=[text_artifact('{"ok": true}')])]])
+    handler = AgentHandler(agent_url="https://example.invalid/agent", client=client)
+
+    await handler.call(RawRecord(value={}, time=0.0))
+
+    assert handler.metrics.last_usage is None
