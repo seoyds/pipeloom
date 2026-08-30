@@ -41,7 +41,7 @@ class Uppercase(Handler):
 async def main() -> None:
     pipeline = Pipeline()
     pipeline.add_handler(Uppercase())
-    sink = pipeline.add_sink(sink_type="memory")  # registers InMemorySink for Record
+    sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
 
     await run(IterableSource([{"name": "ada"}]), pipeline)
     print(sink.received)  # [{'name': 'ADA'}]
@@ -88,10 +88,11 @@ A sink is a plain class with one `write(message)` method -- no `@step`, no
 notion of "record" vs "error" of its own. Two ways to register one with
 `Pipeline.add_sink`:
 
-- **`add_sink(sink_type=..., sink_params=..., sink_trigger=Record)`** --
-  builds a sink from the built-in registry (table below), wired to fire on
-  exactly one message type (`Record` by default). Returns the constructed
-  sink so you can read its state or call `close()`.
+- **`add_sink(sink_type=..., sink_params=..., sink_trigger=...)`** -- builds
+  a sink from the built-in registry (table below), wired to fire on exactly
+  one message type. `sink_trigger` is required and never defaulted -- e.g.
+  `Record` or `ErrorMessage` -- since it's what actually activates the sink.
+  Returns the constructed sink so you can read its state or call `close()`.
 - **`add_sink(some_handler)`** -- a custom `Handler` you wrote yourself, for
   cases the registry doesn't cover; its own `@step`s decide what it reacts
   to (and can react to more than one type, unlike the config path).
@@ -111,10 +112,10 @@ call with `sink_trigger=ErrorMessage` -- same sink_type or a different one,
 your choice:
 
 ```python
-pipeline.add_sink(sink_type="memory")                                   # Records
-pipeline.add_sink(sink_type="json", sink_params={"path": "out.jsonl"})  # Records, too
+pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+pipeline.add_sink(sink_type="json", sink_params={"path": "out.jsonl"}, sink_trigger=Record)
 pipeline.add_sink(sink_type="json", sink_params={"path": "errors.jsonl"},
-                   sink_trigger=ErrorMessage)                            # Errors, separately
+                   sink_trigger=ErrorMessage)  # a separate sink, separate trigger
 ```
 
 ### Built-in sink types (`pipeloom.dataio.sinks`, no extra required)
@@ -149,12 +150,12 @@ the engine yourself and pass it as `engine=`.
 import pipeloom.dataio.kafka  # noqa: F401 -- registers sink_type="kafka"
 import pipeloom.dataio.db     # noqa: F401 -- registers sink_type="rdb"
 
-pipeline.add_sink(sink_type="kafka", sink_params={
+pipeline.add_sink(sink_type="kafka", sink_trigger=Record, sink_params={
     "topic": "records",
     "producer_config": {"bootstrap.servers": "localhost:9092"},
 })
 
-pipeline.add_sink(sink_type="rdb", sink_params={
+pipeline.add_sink(sink_type="rdb", sink_trigger=Record, sink_params={
     "table": my_table,
     "db_type": "postgres",
     "host": "localhost", "port": 5432, "user": "app", "password": "...", "database": "app",

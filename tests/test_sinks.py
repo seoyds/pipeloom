@@ -51,7 +51,7 @@ async def test_in_memory_sink_collects_errors_via_a_separate_add_sink_call():
 async def test_json_lines_sink_writes_rows_as_json_lines(tmp_path):
     path = tmp_path / "out.jsonl"
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="json", sink_params={"path": path})
+    sink = pipeline.add_sink(sink_type="json", sink_params={"path": path}, sink_trigger=Record)
 
     await pipeline.process(Record({"name": "ADA"}))
     await pipeline.process(Record({"name": "GRACE"}))
@@ -66,7 +66,7 @@ async def test_json_lines_sink_can_be_registered_a_second_time_for_errors(tmp_pa
     out_path = tmp_path / "out.jsonl"
     error_path = tmp_path / "errors.jsonl"
     pipeline = Pipeline()
-    records_sink = pipeline.add_sink(sink_type="json", sink_params={"path": out_path})
+    records_sink = pipeline.add_sink(sink_type="json", sink_params={"path": out_path}, sink_trigger=Record)
     errors_sink = pipeline.add_sink(
         sink_type="json", sink_params={"path": error_path}, sink_trigger=ErrorMessage
     )
@@ -85,7 +85,7 @@ async def test_json_lines_sink_can_be_registered_a_second_time_for_errors(tmp_pa
 async def test_csv_sink_writes_a_header_from_the_first_record(tmp_path):
     path = tmp_path / "out.csv"
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="csv", sink_params={"path": path})
+    sink = pipeline.add_sink(sink_type="csv", sink_params={"path": path}, sink_trigger=Record)
 
     await pipeline.process(Record({"name": "ada", "role": "engineer"}))
     await pipeline.process(Record({"name": "grace", "role": "admiral"}))

@@ -44,7 +44,7 @@ def test_kafka_sink_requires_either_producer_or_config():
 async def test_kafka_sink_publishes_records_as_json():
     producer = FakeProducer()
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="kafka", sink_params={"topic": "records", "producer": producer})
+    sink = pipeline.add_sink(sink_type="kafka", sink_params={"topic": "records", "producer": producer}, sink_trigger=Record)
 
     await pipeline.process(Record({"name": "ada"}))
     sink.close()
@@ -62,6 +62,7 @@ async def test_kafka_sink_uses_key_fn_to_derive_the_message_key():
     sink = pipeline.add_sink(
         sink_type="kafka",
         sink_params={"topic": "records", "producer": producer, "key_fn": lambda row: row["name"]},
+        sink_trigger=Record,
     )
 
     await pipeline.process(Record({"name": "ada"}))

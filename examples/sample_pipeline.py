@@ -47,10 +47,10 @@ async def main() -> None:
     pipeline.add_handler(UppercaseTransform())
 
     # add_sink (not add_handler) broadcasts every Record to both of these --
-    # sink_trigger defaults to Record, so both see every successful record.
-    memory_sink = pipeline.add_sink(sink_type="memory")
+    # sink_trigger is required and never defaulted, so it's explicit below.
+    memory_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
     json_path = Path(tempfile.gettempdir()) / "pipeloom_sample_output.jsonl"
-    json_sink = pipeline.add_sink(sink_type="json", sink_params={"path": json_path})
+    json_sink = pipeline.add_sink(sink_type="json", sink_params={"path": json_path}, sink_trigger=Record)
     # A sink only ever fires on one trigger type -- persisting errors too
     # means a separate add_sink call with sink_trigger=ErrorMessage.
     error_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)

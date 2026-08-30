@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, DefaultDict, Dict, List, Optional, Tuple, Type, Union
 
-from pipeloom.messages import ErrorMessage, Message, Record
+from pipeloom.messages import ErrorMessage, Message
 from pipeloom.exceptions import PipelineError, PipelineFailed, PipelineStopped, RoutingError
 from pipeloom.stages import Stage, get_stage_names
 
@@ -225,7 +225,7 @@ class Pipeline:
         *,
         sink_type: Optional[str] = None,
         sink_params: Optional[dict] = None,
-        sink_trigger: Type[Message] = Record,
+        sink_trigger: Optional[Type[Message]] = None,
     ) -> Any:
         """Register a sink to broadcast messages to. Two ways to call this:
 
@@ -236,10 +236,11 @@ class Pipeline:
         - add_sink(sink_type=..., sink_params=..., sink_trigger=...): builds
           a built-in sink from the registry (see register_sink_type, and
           pipeloom.dataio.sinks/parquet/kafka/db for what's available and
-          what sink_params each expects) that fires on exactly one message
-          type -- sink_trigger, Record by default. To also persist
-          ErrorMessage, make a second, separate add_sink(..., sink_trigger=
-          ErrorMessage) call -- a sink never handles more than one trigger.
+          what sink_params each expects). sink_trigger is required here --
+          e.g. Record or ErrorMessage -- and is exactly what fires the sink;
+          nothing is implied or defaulted. To also persist ErrorMessage,
+          make a second, separate add_sink(..., sink_trigger=ErrorMessage)
+          call -- a sink never handles more than one trigger.
 
         Either way: unlike add_handler's single-path, consume-based routing
         -- where only the first matching step ever sees a given message --
@@ -265,6 +266,11 @@ class Pipeline:
 
         if sink_type is None:
             raise ValueError("add_sink: pass either sink or sink_type")
+        if sink_trigger is None:
+            raise ValueError(
+                "add_sink: sink_type requires sink_trigger (the message type that "
+                "fires this sink, e.g. Record or ErrorMessage) -- it is never defaulted"
+            )
         try:
             factory = _SINK_TYPES[sink_type]
         except KeyError:

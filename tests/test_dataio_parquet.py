@@ -12,7 +12,7 @@ from pipeloom.messages import Record
 async def test_parquet_sink_writes_records(tmp_path):
     path = tmp_path / "out.parquet"
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="parquet", sink_params={"path": path})
+    sink = pipeline.add_sink(sink_type="parquet", sink_params={"path": path}, sink_trigger=Record)
 
     await pipeline.process(Record({"name": "ada", "age": 36}))
     await pipeline.process(Record({"name": "grace", "age": 85}))
@@ -29,7 +29,7 @@ async def test_parquet_sink_writes_records(tmp_path):
 async def test_parquet_sink_flushes_a_full_batch_before_close(tmp_path):
     path = tmp_path / "out.parquet"
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="parquet", sink_params={"path": path, "batch_size": 2})
+    sink = pipeline.add_sink(sink_type="parquet", sink_params={"path": path, "batch_size": 2}, sink_trigger=Record)
 
     await pipeline.process(Record({"n": 1}))
     await pipeline.process(Record({"n": 2}))  # triggers an in-flight flush

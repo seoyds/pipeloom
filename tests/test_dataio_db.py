@@ -29,7 +29,7 @@ async def _make_engine_and_table():
 async def test_db_sink_inserts_records():
     engine, table = await _make_engine_and_table()
     pipeline = Pipeline()
-    sink = pipeline.add_sink(sink_type="rdb", sink_params={"engine": engine, "table": table})
+    sink = pipeline.add_sink(sink_type="rdb", sink_params={"engine": engine, "table": table}, sink_trigger=Record)
 
     await pipeline.process(Record({"name": "ada", "age": 36}))
     await pipeline.process(Record({"name": "grace", "age": 85}))
@@ -48,7 +48,7 @@ async def test_db_sink_flushes_a_full_batch_before_close():
     engine, table = await _make_engine_and_table()
     pipeline = Pipeline()
     sink = pipeline.add_sink(
-        sink_type="rdb", sink_params={"engine": engine, "table": table, "batch_size": 2}
+        sink_type="rdb", sink_params={"engine": engine, "table": table, "batch_size": 2}, sink_trigger=Record
     )
 
     await pipeline.process(Record({"name": "ada", "age": 36}))
