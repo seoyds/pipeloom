@@ -4,41 +4,54 @@ import json
 import pytest
 
 from pipeloom.core import Pipeline
-from pipeloom.dataio.sinks import CSVSink, InMemorySink, JSONLinesSink
+from pipeloom.dataio.sinks import CSVSink, InMemorySink, JSONLinesSink, row_from_message
 from pipeloom.messages import ErrorMessage, RawRecord, Record
 
 
+def test_row_from_message_flattens_a_record():
+    assert row_from_message(Record({"a": 1})) == {"a": 1}
+
+
+def test_row_from_message_flattens_an_error_message():
+    err = ErrorMessage(message=RawRecord(value={}, time=0.0), exception=ValueError("boom"), reason="bad_input")
+    row = row_from_message(err)
+    assert row["exception"] == "boom"
+    assert row["reason"] == "bad_input"
+
+
+def test_row_from_message_rejects_an_unsupported_message_type():
+    with pytest.raises(TypeError):
+        row_from_message(RawRecord(value={}, time=0.0))
+
+
 @pytest.mark.asyncio
-async def test_in_memory_sink_collects_records():
+async def test_in_memory_sink_collects_records_via_add_sink():
     pipeline = Pipeline()
-    sink = InMemorySink()
-    pipeline.add_handler(sink)
+    sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
 
     await pipeline.process(Record({"a": 1}))
 
-    assert sink.records == [{"a": 1}]
-    assert sink.errors == []
+    assert sink.received == [{"a": 1}]
 
 
 @pytest.mark.asyncio
-async def test_in_memory_sink_collects_errors():
+async def test_in_memory_sink_collects_errors_via_a_separate_add_sink_call():
     pipeline = Pipeline()
-    sink = InMemorySink()
-    pipeline.add_handler(sink)
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+    errors_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
 
     err = ErrorMessage(message=RawRecord(value={}, time=0.0), exception=ValueError("x"))
     await pipeline.process(err)
 
-    assert sink.errors == [err]
-    assert sink.records == []
+    assert errors_sink.received == [err]
+    assert records_sink.received == []
 
 
 @pytest.mark.asyncio
-async def test_json_lines_sink_writes_records_as_json_lines(tmp_path):
+async def test_json_lines_sink_writes_rows_as_json_lines(tmp_path):
     path = tmp_path / "out.jsonl"
     pipeline = Pipeline()
-    sink = JSONLinesSink(path)
-    pipeline.add_handler(sink)
+    sink = pipeline.add_sink(sink_type="json", sink_params={"path": path})
 
     await pipeline.process(Record({"name": "ADA"}))
     await pipeline.process(Record({"name": "GRACE"}))
@@ -49,30 +62,30 @@ async def test_json_lines_sink_writes_records_as_json_lines(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_json_lines_sink_writes_errors_to_a_lazily_opened_error_file(tmp_path):
-    path = tmp_path / "out.jsonl"
-    error_path = tmp_path / "out.jsonl.errors"
+async def test_json_lines_sink_can_be_registered_a_second_time_for_errors(tmp_path):
+    out_path = tmp_path / "out.jsonl"
+    error_path = tmp_path / "errors.jsonl"
     pipeline = Pipeline()
-    sink = JSONLinesSink(path)
-    pipeline.add_handler(sink)
-
-    assert not error_path.exists()
+    records_sink = pipeline.add_sink(sink_type="json", sink_params={"path": out_path})
+    errors_sink = pipeline.add_sink(
+        sink_type="json", sink_params={"path": error_path}, sink_trigger=ErrorMessage
+    )
 
     err = ErrorMessage(message=RawRecord(value={}, time=0.0), exception=ValueError("boom"))
     await pipeline.process(err)
-    sink.close()
+    records_sink.close()
+    errors_sink.close()
 
-    assert error_path.exists()
     logged = json.loads(error_path.read_text().splitlines()[0])
     assert logged["exception"] == "boom"
+    assert out_path.read_text() == ""
 
 
 @pytest.mark.asyncio
 async def test_csv_sink_writes_a_header_from_the_first_record(tmp_path):
     path = tmp_path / "out.csv"
     pipeline = Pipeline()
-    sink = CSVSink(path)
-    pipeline.add_handler(sink)
+    sink = pipeline.add_sink(sink_type="csv", sink_params={"path": path})
 
     await pipeline.process(Record({"name": "ada", "role": "engineer"}))
     await pipeline.process(Record({"name": "grace", "role": "admiral"}))
@@ -86,14 +99,18 @@ async def test_csv_sink_writes_a_header_from_the_first_record(tmp_path):
     ]
 
 
-@pytest.mark.asyncio
-async def test_csv_sink_rejects_a_record_with_different_fields(tmp_path):
+def test_csv_sink_rejects_a_row_with_different_fields(tmp_path):
     path = tmp_path / "out.csv"
-    pipeline = Pipeline()
     sink = CSVSink(path)
-    pipeline.add_handler(sink)
 
-    await pipeline.process(Record({"name": "ada"}))
+    sink.write(Record({"name": "ada"}))
     with pytest.raises(ValueError):
-        sink.sink_record(Record({"name": "grace", "role": "admiral"}))
+        sink.write(Record({"name": "grace", "role": "admiral"}))
     sink.close()
+
+
+def test_in_memory_sink_write_is_a_single_method_with_no_error_handling_baked_in():
+    sink = InMemorySink()
+    assert hasattr(sink, "write")
+    assert not hasattr(sink, "sink_record")
+    assert not hasattr(sink, "sink_error")

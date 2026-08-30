@@ -44,8 +44,7 @@ def test_kafka_sink_requires_either_producer_or_config():
 async def test_kafka_sink_publishes_records_as_json():
     producer = FakeProducer()
     pipeline = Pipeline()
-    sink = KafkaSink(topic="records", producer=producer)
-    pipeline.add_sink(sink)
+    sink = pipeline.add_sink(sink_type="kafka", sink_params={"topic": "records", "producer": producer})
 
     await pipeline.process(Record({"name": "ada"}))
     sink.close()
@@ -59,20 +58,21 @@ async def test_kafka_sink_publishes_records_as_json():
 @pytest.mark.asyncio
 async def test_kafka_sink_uses_key_fn_to_derive_the_message_key():
     producer = FakeProducer()
-    sink = KafkaSink(topic="records", producer=producer, key_fn=lambda row: row["name"])
     pipeline = Pipeline()
-    pipeline.add_sink(sink)
+    sink = pipeline.add_sink(
+        sink_type="kafka",
+        sink_params={"topic": "records", "producer": producer, "key_fn": lambda row: row["name"]},
+    )
 
     await pipeline.process(Record({"name": "ada"}))
 
     assert producer.produced[0]["key"] == "ada"
 
 
-@pytest.mark.asyncio
-async def test_kafka_sink_surfaces_a_delivery_failure_as_an_error():
+def test_kafka_sink_surfaces_a_delivery_failure_as_an_error():
     producer = FakeProducer()
     producer.fail_next = True
     sink = KafkaSink(topic="records", producer=producer)
 
     with pytest.raises(Exception):
-        sink.sink_record(Record({"name": "ada"}))
+        sink.write(Record({"name": "ada"}))

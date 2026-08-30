@@ -3,9 +3,9 @@ import asyncio
 import pytest
 
 from pipeloom.core import Handler, Pipeline, step
-from pipeloom.dataio.sinks import InMemorySink
+from pipeloom.dataio.sinks import InMemorySink  # noqa: F401 -- registers sink_type="memory"
 from pipeloom.dataio.sources import IterableSource, Source
-from pipeloom.messages import Checkpoint, RawRecord, Record, Shutdown, Tick
+from pipeloom.messages import Checkpoint, ErrorMessage, RawRecord, Record, Shutdown, Tick
 from pipeloom.exceptions import PipelineStopped
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
@@ -29,31 +29,31 @@ class FailOnEmpty(Handler):
 async def test_run_processes_every_record_from_source_to_sink():
     source = IterableSource([{"name": "ada"}, {"name": "grace"}])
     pipeline = Pipeline()
-    sink = InMemorySink()
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+    errors_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
     pipeline.add_handler(FailOnEmpty())
     pipeline.add_handler(UppercaseTransform())
-    pipeline.add_handler(sink)
 
     await run(source, pipeline)
 
-    assert sink.records == [{"name": "ADA"}, {"name": "GRACE"}]
-    assert sink.errors == []
+    assert records_sink.received == [{"name": "ADA"}, {"name": "GRACE"}]
+    assert errors_sink.received == []
 
 
 @pytest.mark.asyncio
 async def test_run_routes_a_failing_record_to_the_error_sink_and_continues():
     source = IterableSource([{}, {"name": "grace"}])
     pipeline = Pipeline()
-    sink = InMemorySink()
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+    errors_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
     pipeline.add_handler(FailOnEmpty())
     pipeline.add_handler(UppercaseTransform())
-    pipeline.add_handler(sink)
 
     await run(source, pipeline)
 
-    assert sink.records == [{"name": "GRACE"}]
-    assert len(sink.errors) == 1
-    assert isinstance(sink.errors[0].exception, ValueError)
+    assert records_sink.received == [{"name": "GRACE"}]
+    assert len(errors_sink.received) == 1
+    assert isinstance(errors_sink.received[0].exception, ValueError)
 
 
 class StopOnSentinel(Handler):
@@ -81,15 +81,13 @@ class LifecycleRecorder(Handler):
 async def test_pipeline_stopped_ends_the_run_successfully():
     source = IterableSource([{"name": "ada"}, {"name": "stop"}, {"name": "grace"}])
     pipeline = Pipeline()
-    sink = InMemorySink()
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
     pipeline.add_handler(StopOnSentinel())
     pipeline.add_handler(UppercaseTransform())
-    pipeline.add_handler(sink)
 
     await run(source, pipeline)  # must return, not raise
 
-    assert sink.records == [{"name": "ADA"}]
-    assert sink.errors == []
+    assert records_sink.received == [{"name": "ADA"}]
 
 
 @pytest.mark.asyncio

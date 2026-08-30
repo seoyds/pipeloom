@@ -2,7 +2,7 @@
 binding over librdkafka: the fastest of the common Python Kafka clients).
 
 Nothing in pipeloom.dataio.sinks/sources imports this module; import it
-explicitly to use KafkaSink.
+explicitly to register sink_type="kafka".
 """
 
 import json
@@ -10,20 +10,21 @@ from typing import Any, Callable, Dict, Optional
 
 from confluent_kafka import KafkaException, Producer
 
-from pipeloom.core import step
-from pipeloom.dataio.sinks import Sink
-from pipeloom.messages import Record
-from pipeloom.stages import Stage
+from pipeloom.core import register_sink_type
+from pipeloom.dataio.sinks import row_from_message
+from pipeloom.messages import Message
+
+__all__ = ["KafkaSink"]
 
 
-class KafkaSink(Sink):
-    """Publishes successful Records as JSON to a Kafka topic.
+class KafkaSink:
+    """Publishes rows as JSON to a Kafka topic.
 
     producer_config is passed straight through to confluent_kafka.Producer
     (must include at least "bootstrap.servers"); pass an already-constructed
     producer instead via `producer` (e.g. a test double). confluent-kafka's
     Producer.produce() only queues the message -- delivery failures surface
-    on the next call to sink_record or close() that serves the producer's
+    on the next call to write() or close() that serves the producer's
     callbacks, becoming an ErrorMessage like any other step failure. Call
     close() to flush in-flight messages before shutdown.
     """
@@ -46,9 +47,8 @@ class KafkaSink(Sink):
         if err is not None:
             self._delivery_error = KafkaException(err)
 
-    @step(Stage.LOAD, consume=True)
-    def sink_record(self, message: Record) -> None:
-        row = dict(message)
+    def write(self, message: Message) -> None:
+        row = row_from_message(message)
         self._producer.produce(
             self._topic,
             value=json.dumps(row).encode("utf-8"),
@@ -62,3 +62,6 @@ class KafkaSink(Sink):
 
     def close(self) -> None:
         self._producer.flush()
+
+
+register_sink_type("kafka", KafkaSink)

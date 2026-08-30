@@ -40,12 +40,11 @@ class Uppercase(Handler):
 
 async def main() -> None:
     pipeline = Pipeline()
-    sink = InMemorySink()
     pipeline.add_handler(Uppercase())
-    pipeline.add_sink(sink)
+    sink = pipeline.add_sink(sink_type="memory")  # registers InMemorySink for Record
 
     await run(IterableSource([{"name": "ada"}]), pipeline)
-    print(sink.records)  # [{'name': 'ADA'}]
+    print(sink.received)  # [{'name': 'ADA'}]
 
 
 asyncio.run(main())
@@ -83,66 +82,83 @@ to run or debug it directly.
   successfully. Pass `tick_interval` (seconds) to also inject `Tick`
   messages between records, for monitoring Handlers (see below).
 
-## Sinks: `add_handler` vs `add_sink`
+## Sinks
 
-A `Sink` is just a `Handler` whose steps write output somewhere. How you
-register it changes its delivery guarantee:
+A sink is a plain class with one `write(message)` method -- no `@step`, no
+notion of "record" vs "error" of its own. Two ways to register one with
+`Pipeline.add_sink`:
 
-- **`pipeline.add_handler(sink)`** -- normal routing. A message is delivered
-  to the *first* step downstream that accepts its type; if that step
-  `consume`s it (the built-in sinks do), no other handler ever sees that
-  message. Fine for exactly one sink.
-- **`pipeline.add_sink(sink)`** -- broadcast. *Every* registered sink whose
-  step accepts a message's type receives it, so you can register as many
-  sinks as you want and all of them see every record. A message handled by
-  at least one sink is fully consumed (it never reaches `add_handler`-routed
-  steps or the catch-all). If one sink raises, that failure becomes an
-  `ErrorMessage` fed back into the pipeline and the remaining sinks still run
-  -- one broken sink can't block the others.
+- **`add_sink(sink_type=..., sink_params=..., sink_trigger=Record)`** --
+  builds a sink from the built-in registry (table below), wired to fire on
+  exactly one message type (`Record` by default). Returns the constructed
+  sink so you can read its state or call `close()`.
+- **`add_sink(some_handler)`** -- a custom `Handler` you wrote yourself, for
+  cases the registry doesn't cover; its own `@step`s decide what it reacts
+  to (and can react to more than one type, unlike the config path).
+
+Either way, `add_sink` is a **broadcast**, unlike `add_handler`'s
+single-path routing (where only the first matching step ever sees a given
+message): *every* registered sink whose trigger matches a message's type
+receives it, so you can register as many sinks as you want and all of them
+see every record. A message handled by at least one sink is fully consumed
+(it never reaches `add_handler`-routed steps or the catch-all). If one sink
+raises, that failure becomes an `ErrorMessage` fed back into the pipeline
+and the remaining sinks still run -- one broken sink can't block the others.
+
+A sink only ever fires on the one `sink_trigger` it was registered with. To
+also persist `ErrorMessage`s, register a **second, separate** `add_sink`
+call with `sink_trigger=ErrorMessage` -- same sink_type or a different one,
+your choice:
 
 ```python
-pipeline.add_sink(InMemorySink())
-pipeline.add_sink(JSONLinesSink("out.jsonl"))
-pipeline.add_sink(ParquetSink("out.parquet"))
-# every Record and ErrorMessage now reaches all three
+pipeline.add_sink(sink_type="memory")                                   # Records
+pipeline.add_sink(sink_type="json", sink_params={"path": "out.jsonl"})  # Records, too
+pipeline.add_sink(sink_type="json", sink_params={"path": "errors.jsonl"},
+                   sink_trigger=ErrorMessage)                            # Errors, separately
 ```
 
-Use `add_handler` only when you truly want a single, ordered consumer (or
-when writing a step that also needs to observe/transform, not just sink).
+### Built-in sink types (`pipeloom.dataio.sinks`, no extra required)
 
-### Built-in sinks (`pipeloom.dataio.sinks`, no extra required)
+| sink_type | sink_params | Writes to |
+|---|---|---|
+| `"memory"` | *(none)* | `.received` list on the returned `InMemorySink` -- useful for tests |
+| `"json"` | `path` | JSON Lines file; call `close()` when done |
+| `"csv"` | `path` | CSV file; header taken from the first row's keys, later rows must match; call `close()` when done |
 
-| Sink | Writes to |
-|---|---|
-| `InMemorySink` | `.records` / `.errors` lists -- useful for tests |
-| `JSONLinesSink(path, error_path=None)` | JSON Lines file; errors go to a lazily-opened `error_path` (default `path + ".errors"`) |
-| `CSVSink(path)` | CSV file; header taken from the first `Record`'s keys, later records must match |
-
-### Optional sinks (own extra + submodule each)
+### Optional sink types (own extra + submodule each)
 
 These live outside `pipeloom.dataio.sinks` specifically so importing the
-core sinks module never pulls in their dependency -- import the submodule
-you need.
+core sinks module never pulls in their dependency -- **importing the
+submodule is what registers the sink_type**, so `import
+pipeloom.dataio.parquet` (even unused directly) before calling
+`add_sink(sink_type="parquet", ...)`.
 
-| Sink | Extra | Needs |
-|---|---|---|
-| `pipeloom.dataio.parquet.ParquetSink(path, batch_size=1000)` | `parquet` | pyarrow |
-| `pipeloom.dataio.kafka.KafkaSink(topic, producer_config=None, producer=None, key_fn=None)` | `kafka` | confluent-kafka |
-| `pipeloom.dataio.db.DBSink(engine, table, batch_size=100)` | `db` | SQLAlchemy async engine + a driver (asyncpg/aiomysql/aiosqlite/...) |
+| sink_type | Extra | sink_params | Needs |
+|---|---|---|---|
+| `"parquet"` | `parquet` | `path`, `batch_size=1000` | pyarrow |
+| `"kafka"` | `kafka` | `topic`, `producer_config` (or `producer=` for a test double), `key_fn=None` | confluent-kafka |
+| `"rdb"` | `db` | `table`, plus either `engine=` (pre-built) or `db_type` ("postgres"/"mysql"/"sqlite") + `host`/`port`/`user`/`password`/`database`, `batch_size=100` | SQLAlchemy async engine + a matching driver (asyncpg/aiomysql/aiosqlite) |
 
-All three batch records and require an explicit `close()` (or `await
-close()` for `DBSink`) to flush what's buffered -- call it after `run()`
-returns, or from a `Shutdown`-handling step.
+All three batch rows and require an explicit `close()` (or `await close()`
+for `"rdb"`, since it's async) to flush what's buffered -- call it after
+`run()` returns, or from a `Shutdown`-handling step. A database without a
+native asyncio driver (e.g. Snowflake) isn't in `db_type`'s table -- build
+the engine yourself and pass it as `engine=`.
 
 ```python
-from pipeloom.dataio.kafka import KafkaSink
-from pipeloom.dataio.db import DBSink
-from sqlalchemy.ext.asyncio import create_async_engine
+import pipeloom.dataio.kafka  # noqa: F401 -- registers sink_type="kafka"
+import pipeloom.dataio.db     # noqa: F401 -- registers sink_type="rdb"
 
-pipeline.add_sink(KafkaSink("records", {"bootstrap.servers": "localhost:9092"}))
+pipeline.add_sink(sink_type="kafka", sink_params={
+    "topic": "records",
+    "producer_config": {"bootstrap.servers": "localhost:9092"},
+})
 
-engine = create_async_engine("postgresql+asyncpg://...")
-pipeline.add_sink(DBSink(engine, my_table))
+pipeline.add_sink(sink_type="rdb", sink_params={
+    "table": my_table,
+    "db_type": "postgres",
+    "host": "localhost", "port": 5432, "user": "app", "password": "...", "database": "app",
+})
 ```
 
 ## Sources (`pipeloom.dataio.sources`)

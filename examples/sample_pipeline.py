@@ -1,8 +1,8 @@
 """A minimal pipeloom pipeline you can run or step through in a debugger.
 
 Reads a few in-memory records, validates them, uppercases their fields, and
-fans the results (or errors) out to two sinks at once via add_sink -- then
-prints what came out.
+fans the results out to two sinks at once via add_sink -- then prints what
+came out. Errors get their own separate sink (sink_trigger=ErrorMessage).
 """
 
 import asyncio
@@ -11,9 +11,9 @@ import tempfile
 from pathlib import Path
 
 from pipeloom.core import Handler, Pipeline, step
-from pipeloom.dataio.sinks import InMemorySink, JSONLinesSink
+from pipeloom.dataio.sinks import InMemorySink, JSONLinesSink  # noqa: F401 -- registers sink_type= "memory"/"json"
 from pipeloom.dataio.sources import IterableSource
-from pipeloom.messages import RawRecord, Record
+from pipeloom.messages import ErrorMessage, RawRecord, Record
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
 
@@ -43,21 +43,23 @@ async def main() -> None:
         ]
     )
     pipeline = Pipeline()
-    memory_sink = InMemorySink()
-    json_path = Path(tempfile.gettempdir()) / "pipeloom_sample_output.jsonl"
-    json_sink = JSONLinesSink(json_path)
     pipeline.add_handler(FailOnEmpty())
     pipeline.add_handler(UppercaseTransform())
-    # add_sink (not add_handler) broadcasts each Record/ErrorMessage to every
-    # sink registered this way -- both of these see every record.
-    pipeline.add_sink(memory_sink)
-    pipeline.add_sink(json_sink)
+
+    # add_sink (not add_handler) broadcasts every Record to both of these --
+    # sink_trigger defaults to Record, so both see every successful record.
+    memory_sink = pipeline.add_sink(sink_type="memory")
+    json_path = Path(tempfile.gettempdir()) / "pipeloom_sample_output.jsonl"
+    json_sink = pipeline.add_sink(sink_type="json", sink_params={"path": json_path})
+    # A sink only ever fires on one trigger type -- persisting errors too
+    # means a separate add_sink call with sink_trigger=ErrorMessage.
+    error_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
 
     await run(source, pipeline)
     json_sink.close()
 
-    logger.info("Records: %s", memory_sink.records)
-    logger.info("Errors: %s", [type(e.exception).__name__ for e in memory_sink.errors])
+    logger.info("Records: %s", memory_sink.received)
+    logger.info("Errors: %s", [type(e.exception).__name__ for e in error_sink.received])
     logger.info("Also written to: %s", json_path)
     logger.info(pipeline.format_profile(pipeline.get_profile_data(), blueprint=True))
 

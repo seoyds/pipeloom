@@ -4,9 +4,9 @@ from a2a.types import TaskState
 from pipeloom.agents.agent_handler import AgentHandler
 from pipeloom.agents.retry import RetryPolicy
 from pipeloom.core import Handler, Pipeline, step
-from pipeloom.dataio.sinks import InMemorySink
+from pipeloom.dataio.sinks import InMemorySink  # noqa: F401 -- registers sink_type="memory"
 from pipeloom.dataio.sources import IterableSource
-from pipeloom.messages import RawRecord
+from pipeloom.messages import ErrorMessage, RawRecord, Record
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
 from tests.agent_test_helpers import FakeClient, task_event, text_artifact
@@ -31,16 +31,16 @@ async def test_pipeline_routes_through_a_local_handler_then_an_agent_handler_to_
     agent = AgentHandler(agent_url="https://example.invalid/agent", client=client)
 
     pipeline = Pipeline()
-    sink = InMemorySink()
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+    errors_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
     pipeline.add_handler(UppercaseKeys())
     pipeline.add_handler(agent)
-    pipeline.add_handler(sink)
 
     source = IterableSource([{"text": "hi"}])
     await run(source, pipeline)
 
-    assert sink.records == [{"category": "greeting"}]
-    assert sink.errors == []
+    assert records_sink.received == [{"category": "greeting"}]
+    assert errors_sink.received == []
 
 
 @pytest.mark.asyncio
@@ -53,16 +53,16 @@ async def test_pipeline_routes_an_agent_failure_to_the_error_sink_and_continues(
     )
 
     pipeline = Pipeline()
-    sink = InMemorySink()
+    records_sink = pipeline.add_sink(sink_type="memory", sink_trigger=Record)
+    errors_sink = pipeline.add_sink(sink_type="memory", sink_trigger=ErrorMessage)
     pipeline.add_handler(agent)
-    pipeline.add_handler(sink)
 
     source = IterableSource([{"text": "hi"}])
     await run(source, pipeline)
 
-    assert sink.records == []
-    assert len(sink.errors) == 1
+    assert records_sink.received == []
+    assert len(errors_sink.received) == 1
     # Both paths: the spec's contract is ErrorMessage.reason, but keep the
     # through-the-exception assertion so a regression on either is caught.
-    assert sink.errors[0].reason == "input_required"
-    assert sink.errors[0].exception.reason == "input_required"
+    assert errors_sink.received[0].reason == "input_required"
+    assert errors_sink.received[0].exception.reason == "input_required"

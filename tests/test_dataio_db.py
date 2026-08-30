@@ -29,8 +29,7 @@ async def _make_engine_and_table():
 async def test_db_sink_inserts_records():
     engine, table = await _make_engine_and_table()
     pipeline = Pipeline()
-    sink = DBSink(engine, table)
-    pipeline.add_sink(sink)
+    sink = pipeline.add_sink(sink_type="rdb", sink_params={"engine": engine, "table": table})
 
     await pipeline.process(Record({"name": "ada", "age": 36}))
     await pipeline.process(Record({"name": "grace", "age": 85}))
@@ -48,8 +47,9 @@ async def test_db_sink_inserts_records():
 async def test_db_sink_flushes_a_full_batch_before_close():
     engine, table = await _make_engine_and_table()
     pipeline = Pipeline()
-    sink = DBSink(engine, table, batch_size=2)
-    pipeline.add_sink(sink)
+    sink = pipeline.add_sink(
+        sink_type="rdb", sink_params={"engine": engine, "table": table, "batch_size": 2}
+    )
 
     await pipeline.process(Record({"name": "ada", "age": 36}))
     await pipeline.process(Record({"name": "grace", "age": 85}))  # triggers a flush
@@ -62,3 +62,35 @@ async def test_db_sink_flushes_a_full_batch_before_close():
 
     await sink.close()
     await engine.dispose()
+
+
+def test_db_sink_requires_either_engine_or_db_type():
+    metadata = MetaData()
+    table = Table("people", metadata, Column("name", String))
+    with pytest.raises(ValueError):
+        DBSink(table)
+
+
+def test_db_sink_rejects_an_unknown_db_type():
+    metadata = MetaData()
+    table = Table("people", metadata, Column("name", String))
+    with pytest.raises(ValueError, match="Unknown db_type"):
+        DBSink(table, db_type="snowflake")
+
+
+@pytest.mark.asyncio
+async def test_db_sink_builds_its_own_engine_from_db_type():
+    metadata = MetaData()
+    table = Table("people", metadata, Column("name", String))
+    sink = DBSink(table, db_type="sqlite", database=":memory:")
+    async with sink._engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+
+    await sink.write(Record({"name": "ada"}))
+    await sink.close()
+
+    async with sink._engine.connect() as conn:
+        result = await conn.execute(select(table))
+        rows = [dict(r._mapping) for r in result]
+    assert rows == [{"name": "ada"}]
+    await sink._engine.dispose()

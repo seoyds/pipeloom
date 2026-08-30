@@ -10,11 +10,31 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, DefaultDict, Dict, List, Optional, Tuple, Type, Union
 
-from pipeloom.messages import ErrorMessage, Message
+from pipeloom.messages import ErrorMessage, Message, Record
 from pipeloom.exceptions import PipelineError, PipelineFailed, PipelineStopped, RoutingError
 from pipeloom.stages import Stage, get_stage_names
 
 _step_counter = itertools.count()
+
+_SINK_TYPES: Dict[str, Callable[..., Any]] = {}
+
+
+def register_sink_type(name: str, factory: Callable[..., Any]) -> None:
+    """Register a sink implementation under `name` for Pipeline.add_sink's
+    sink_type= config path. pipeloom.dataio.sinks/parquet/kafka/db each call
+    this at import time -- a sink_type is only available once its module has
+    been imported (directly, or transitively by importing something else
+    from it)."""
+    _SINK_TYPES[name] = factory
+
+
+@dataclass
+class _SinkRegistration:
+    """A sink_type= registration: the constructed implementation, and the one
+    Message type it was configured to fire on."""
+
+    impl: Any
+    trigger: Type[Message]
 
 
 @dataclass
@@ -172,7 +192,7 @@ class Pipeline:
 
     def __init__(self) -> None:
         self._handlers: List[Handler] = []
-        self._sinks: List[Handler] = []
+        self._sinks: List[Union[Handler, _SinkRegistration]] = []
         self._catch_all = _CatchAllHandler()
         self._dirty = True
         self._steps: List[StepInfo] = []
@@ -199,24 +219,76 @@ class Pipeline:
         self._handlers.remove(handler)
         self._dirty = True
 
-    def add_sink(self, sink: Handler) -> None:
-        """Register a Sink to broadcast to. Unlike add_handler's single-path,
-        consume-based routing -- where only the first matching step ever sees
-        a given message -- add_sink calls EVERY registered sink whose step
-        accepts a message's type, so any number of sinks can be registered
-        and all of them see every matching message. A message handled by at
-        least one sink is treated as fully consumed: it never also reaches
-        add_handler-routed steps or the built-in catch-all. A failure in one
-        sink (turned into an ErrorMessage, fed back into the pipeline) does
-        not stop the remaining sinks from also receiving the message."""
-        if sink in self._sinks:
-            raise ValueError(f"{sink} is already registered")
-        self._sinks.append(sink)
-        self._dirty = True
+    def add_sink(
+        self,
+        sink: Optional[Handler] = None,
+        *,
+        sink_type: Optional[str] = None,
+        sink_params: Optional[dict] = None,
+        sink_trigger: Type[Message] = Record,
+    ) -> Any:
+        """Register a sink to broadcast messages to. Two ways to call this:
 
-    def remove_sink(self, sink: Handler) -> None:
-        self._sinks.remove(sink)
+        - add_sink(sink): a custom Handler you wrote yourself -- its own
+          @step methods decide what message type(s) it reacts to (and can
+          react to several), exactly like add_handler, just broadcast (see
+          below) instead of single-path routed.
+        - add_sink(sink_type=..., sink_params=..., sink_trigger=...): builds
+          a built-in sink from the registry (see register_sink_type, and
+          pipeloom.dataio.sinks/parquet/kafka/db for what's available and
+          what sink_params each expects) that fires on exactly one message
+          type -- sink_trigger, Record by default. To also persist
+          ErrorMessage, make a second, separate add_sink(..., sink_trigger=
+          ErrorMessage) call -- a sink never handles more than one trigger.
+
+        Either way: unlike add_handler's single-path, consume-based routing
+        -- where only the first matching step ever sees a given message --
+        every registered sink whose step accepts a message's type is called,
+        so any number of sinks can be registered and all of them see every
+        matching message. A message handled by at least one sink is treated
+        as fully consumed: it never also reaches add_handler-routed steps or
+        the built-in catch-all. A failure in one sink (turned into an
+        ErrorMessage, fed back into the pipeline) does not stop the
+        remaining sinks from also receiving the message.
+
+        Returns the registered object: `sink` itself for the Handler path,
+        or the constructed sink implementation for the sink_type path (so
+        you can call, or await, its close())."""
+        if sink is not None:
+            if sink_type is not None:
+                raise ValueError("add_sink: pass either sink or sink_type, not both")
+            if sink in self._sinks:
+                raise ValueError(f"{sink} is already registered")
+            self._sinks.append(sink)
+            self._dirty = True
+            return sink
+
+        if sink_type is None:
+            raise ValueError("add_sink: pass either sink or sink_type")
+        try:
+            factory = _SINK_TYPES[sink_type]
+        except KeyError:
+            raise ValueError(
+                f"Unknown sink_type {sink_type!r}. Registered: {sorted(_SINK_TYPES)}. "
+                "Did you forget to import the module that registers it "
+                "(pipeloom.dataio.sinks, .parquet, .kafka, or .db)?"
+            ) from None
+        impl = factory(**(sink_params or {}))
+        self._sinks.append(_SinkRegistration(impl=impl, trigger=sink_trigger))
         self._dirty = True
+        return impl
+
+    def remove_sink(self, sink: Any) -> None:
+        """Remove a sink previously registered via add_sink -- pass the same
+        object add_sink returned (the Handler for the sink= path, or the
+        constructed implementation for the sink_type= path)."""
+        for entry in self._sinks:
+            target = entry if isinstance(entry, Handler) else entry.impl
+            if target is sink:
+                self._sinks.remove(entry)
+                self._dirty = True
+                return
+        raise ValueError(f"{sink} is not registered")
 
     def _rebuild(self) -> None:
         self._next_step_cache.clear()
@@ -227,8 +299,24 @@ class Pipeline:
         steps += self._catch_all.get_steps()  # always last, regardless of stage sort
 
         sink_steps: List[StepInfo] = []
-        for sink in self._sinks:
-            sink_steps += sink.get_steps()
+        for entry in self._sinks:
+            if isinstance(entry, Handler):
+                sink_steps += entry.get_steps()
+            else:
+                impl = entry.impl
+                doc = inspect.cleandoc(impl.write.__doc__) if impl.write.__doc__ else None
+                sink_steps.append(
+                    StepInfo(
+                        name=f"{type(impl).__name__}.write",
+                        stage=Stage.LOAD,
+                        rank=next(_step_counter),
+                        accepts=entry.trigger,
+                        returns=type(None),
+                        consume=True,
+                        func=impl.write,
+                        description=doc,
+                    )
+                )
 
         def _noop(message: Message) -> Message:
             return message
