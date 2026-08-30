@@ -172,9 +172,11 @@ class Pipeline:
 
     def __init__(self) -> None:
         self._handlers: List[Handler] = []
+        self._sinks: List[Handler] = []
         self._catch_all = _CatchAllHandler()
         self._dirty = True
         self._steps: List[StepInfo] = []
+        self._sink_steps: List[StepInfo] = []
         self._entry: Optional[StepInfo] = None
         self._next_step_cache: Dict[Tuple[StepInfo, Type[Message]], StepInfo] = {}
         self._total_calls: List[int] = []
@@ -197,6 +199,25 @@ class Pipeline:
         self._handlers.remove(handler)
         self._dirty = True
 
+    def add_sink(self, sink: Handler) -> None:
+        """Register a Sink to broadcast to. Unlike add_handler's single-path,
+        consume-based routing -- where only the first matching step ever sees
+        a given message -- add_sink calls EVERY registered sink whose step
+        accepts a message's type, so any number of sinks can be registered
+        and all of them see every matching message. A message handled by at
+        least one sink is treated as fully consumed: it never also reaches
+        add_handler-routed steps or the built-in catch-all. A failure in one
+        sink (turned into an ErrorMessage, fed back into the pipeline) does
+        not stop the remaining sinks from also receiving the message."""
+        if sink in self._sinks:
+            raise ValueError(f"{sink} is already registered")
+        self._sinks.append(sink)
+        self._dirty = True
+
+    def remove_sink(self, sink: Handler) -> None:
+        self._sinks.remove(sink)
+        self._dirty = True
+
     def _rebuild(self) -> None:
         self._next_step_cache.clear()
         steps: List[StepInfo] = []
@@ -204,6 +225,10 @@ class Pipeline:
             steps += handler.get_steps()
         steps.sort(key=lambda s: s.stage)
         steps += self._catch_all.get_steps()  # always last, regardless of stage sort
+
+        sink_steps: List[StepInfo] = []
+        for sink in self._sinks:
+            sink_steps += sink.get_steps()
 
         def _noop(message: Message) -> Message:
             return message
@@ -219,9 +244,18 @@ class Pipeline:
             prev.next = s
             prev = s
 
+        # Sink steps are matched directly by type in process(), not spliced into
+        # the routed chain -- but anything a sink emits (including an ErrorMessage
+        # from a failing sink) must still be able to reach a real handler, so each
+        # one's `.next` points at the start of the main chain, same as `entry`.
+        for i, s in enumerate(sink_steps, start=len(steps) + 1):
+            s.idx = i
+            s.next = entry.next
+
         self._entry = entry
         self._steps = steps
-        n = len(steps) + 1
+        self._sink_steps = sink_steps
+        n = len(steps) + len(sink_steps) + 1
         self._total_calls = [0] * n
         self._total_time = [0.0] * n
         self._emitted_counts = [0] * n
@@ -236,12 +270,34 @@ class Pipeline:
             node = node.next
         raise RoutingError(f"No handler found for message type {message_type.__name__}")
 
+    def _apply_result(self, step: StepInfo, result: Any, stack: List[Tuple[StepInfo, Message]]) -> None:
+        if result is None:
+            return
+        if isinstance(result, Message):
+            self._emitted_counts[step.idx] += 1
+            stack.append((step, result))
+            return
+        if hasattr(result, "__iter__"):
+            results = list(result)
+            for r in results:
+                if not isinstance(r, Message):
+                    raise PipelineError(f"{step} returned an iterable containing a non-Message value: {r!r}")
+            self._emitted_counts[step.idx] += len(results)
+            stack.extend((step, r) for r in reversed(results))
+            return
+        raise PipelineError(f"{step} returned an invalid value: {result!r}")
+
     async def process(self, message: Message) -> None:
         """Route a Message through the pipeline by type: each step runs when the
         message matches its annotated argument. A consume=True step swallows its
         input; otherwise the input is re-queued and keeps routing downstream. An
         exception inside a step becomes an ErrorMessage that continues routing
-        from the failing step, so failures travel as data."""
+        from the failing step, so failures travel as data.
+
+        Before routing, a message is offered to every add_sink-registered sink
+        whose step accepts its type (see add_sink); if any sink accepts it, the
+        message is considered consumed and never reaches add_handler-routed
+        steps or the built-in catch-all."""
         if self._dirty:
             self._rebuild()
         assert self._entry is not None
@@ -259,6 +315,28 @@ class Pipeline:
                     producer, msg = stack.pop()
                     msg_type = type(msg)
                     self._message_tallies[producer.idx][msg_type] += 1
+
+                    matched_sinks = [s for s in self._sink_steps if issubclass(msg_type, s.accepts)]
+                    if matched_sinks:
+                        for sink_step in matched_sinks:
+                            start = time.perf_counter()
+                            try:
+                                result = sink_step.func(msg)
+                                if inspect.isawaitable(result):
+                                    result = await result
+                            except (PipelineStopped, PipelineFailed):
+                                raise
+                            except Exception as exc:
+                                self._total_calls[sink_step.idx] += 1
+                                self._total_time[sink_step.idx] += time.perf_counter() - start
+                                error = ErrorMessage(message=msg, exception=exc, reason=getattr(exc, "reason", None))
+                                stack.append((sink_step, error))
+                                continue  # a failing sink must not block the others
+                            self._total_calls[sink_step.idx] += 1
+                            self._total_time[sink_step.idx] += time.perf_counter() - start
+                            self._apply_result(sink_step, result, stack)
+                        continue
+
                     key = (producer, msg_type)
                     next_step = cache.get(key)
                     if next_step is None:
@@ -278,23 +356,7 @@ class Pipeline:
                     if not target.consume:
                         stack.append((target, msg))
 
-                    if result is None:
-                        pass
-                    elif isinstance(result, Message):
-                        self._emitted_counts[target.idx] += 1
-                        stack.append((target, result))
-                    elif hasattr(result, "__iter__"):
-                        results = list(result)
-                        for r in results:
-                            if not isinstance(r, Message):
-                                raise PipelineError(
-                                    f"{target} returned an iterable containing a "
-                                    f"non-Message value: {r!r}"
-                                )
-                        self._emitted_counts[target.idx] += len(results)
-                        stack.extend((target, r) for r in reversed(results))
-                    else:
-                        raise PipelineError(f"{target} returned an invalid value: {result!r}")
+                    self._apply_result(target, result, stack)
             except (PipelineStopped, PipelineFailed):
                 raise
             except Exception as exc:
@@ -307,7 +369,7 @@ class Pipeline:
         if self._dirty:
             self._rebuild()
         assert self._entry is not None
-        complete = [self._entry] + self._steps
+        complete = [self._entry] + self._steps + self._sink_steps
         pipeline_entries = []
         for s in complete:
             emits = []

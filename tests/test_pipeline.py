@@ -364,6 +364,90 @@ def test_step_accepts_collections_abc_iterable_return_annotation():
     AbcIterableFanOut()
 
 
+class RecordingSink(Handler):
+    def __init__(self) -> None:
+        self.received: list = []
+
+    @step(Stage.LOAD, consume=True)
+    def sink_record(self, message: Record) -> None:
+        self.received.append(dict(message))
+
+
+@pytest.mark.asyncio
+async def test_add_sink_broadcasts_to_every_registered_sink():
+    pipeline = Pipeline()
+    sink_a = RecordingSink()
+    sink_b = RecordingSink()
+    pipeline.add_handler(Uppercase())
+    pipeline.add_sink(sink_a)
+    pipeline.add_sink(sink_b)
+
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+
+    assert sink_a.received == [{"a": "X"}]
+    assert sink_b.received == [{"a": "X"}]
+
+
+@pytest.mark.asyncio
+async def test_add_sink_message_never_reaches_add_handler_routed_steps():
+    pipeline = Pipeline()
+    collector = Collector()  # add_handler-routed, would also consume Record
+    sink = RecordingSink()
+    pipeline.add_handler(Uppercase())
+    pipeline.add_handler(collector)
+    pipeline.add_sink(sink)
+
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+
+    assert sink.received == [{"a": "X"}]
+    assert collector.received == []  # add_sink took it first
+
+
+@pytest.mark.asyncio
+async def test_add_sink_isolates_one_failing_sink_from_the_others():
+    class BrokenSink(Handler):
+        @step(Stage.LOAD, consume=True)
+        def sink_record(self, message: Record) -> None:
+            raise ValueError("disk full")
+
+    pipeline = Pipeline()
+    broken = BrokenSink()
+    healthy = RecordingSink()
+    errors = ErrorCollector()
+    pipeline.add_sink(broken)
+    pipeline.add_sink(healthy)
+    pipeline.add_handler(errors)  # add_handler: ErrorMessage isn't sink-registered
+
+    await pipeline.process(Record({"a": 1}))
+
+    assert healthy.received == [{"a": 1}]
+    assert len(errors.errors) == 1
+    assert isinstance(errors.errors[0].exception, ValueError)
+
+
+@pytest.mark.asyncio
+async def test_add_sink_registering_the_same_sink_twice_raises():
+    pipeline = Pipeline()
+    sink = RecordingSink()
+    pipeline.add_sink(sink)
+    with pytest.raises(ValueError):
+        pipeline.add_sink(sink)
+
+
+@pytest.mark.asyncio
+async def test_remove_sink_stops_it_from_receiving_further_messages():
+    pipeline = Pipeline()
+    sink = RecordingSink()
+    pipeline.add_sink(sink)
+    await pipeline.process(Record({"a": 1}))
+    pipeline.remove_sink(sink)
+
+    # No longer sink-consumed; falls through to the catch-all's silent drop.
+    await pipeline.process(Record({"a": 2}))
+
+    assert sink.received == [{"a": 1}]
+
+
 @pytest.mark.asyncio
 async def test_handlers_run_in_stage_order_regardless_of_registration_order():
     pipeline = Pipeline()

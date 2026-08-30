@@ -9,7 +9,13 @@ from pipeloom.stages import Stage
 
 
 class Sink(Handler):
-    """Marker base class for Handlers whose job is to consume final output."""
+    """Marker base class for Handlers whose job is to consume final output.
+
+    Register instances via Pipeline.add_sink, not add_handler: add_sink
+    broadcasts a message to every registered sink that accepts its type, so
+    any number of sinks can be stacked and all of them see every record.
+    add_handler still works for a single sink, but its normal routing only
+    ever delivers a message to the first matching step."""
 
 
 class InMemorySink(Sink):
