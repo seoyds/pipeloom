@@ -1,14 +1,17 @@
 """A minimal pipeloom pipeline you can run or step through in a debugger.
 
 Reads a few in-memory records, validates them, uppercases their fields, and
-sinks the results (or errors) in memory -- then prints what came out.
+fans the results (or errors) out to two sinks at once via add_sink -- then
+prints what came out.
 """
 
 import asyncio
 import logging
+import tempfile
+from pathlib import Path
 
 from pipeloom.core import Handler, Pipeline, step
-from pipeloom.dataio.sinks import InMemorySink
+from pipeloom.dataio.sinks import InMemorySink, JSONLinesSink
 from pipeloom.dataio.sources import IterableSource
 from pipeloom.messages import RawRecord, Record
 from pipeloom.pipeline import run
@@ -40,15 +43,22 @@ async def main() -> None:
         ]
     )
     pipeline = Pipeline()
-    sink = InMemorySink()
+    memory_sink = InMemorySink()
+    json_path = Path(tempfile.gettempdir()) / "pipeloom_sample_output.jsonl"
+    json_sink = JSONLinesSink(json_path)
     pipeline.add_handler(FailOnEmpty())
     pipeline.add_handler(UppercaseTransform())
-    pipeline.add_handler(sink)
+    # add_sink (not add_handler) broadcasts each Record/ErrorMessage to every
+    # sink registered this way -- both of these see every record.
+    pipeline.add_sink(memory_sink)
+    pipeline.add_sink(json_sink)
 
     await run(source, pipeline)
+    json_sink.close()
 
-    logger.info("Records: %s", sink.records)
-    logger.info("Errors: %s", [type(e.exception).__name__ for e in sink.errors])
+    logger.info("Records: %s", memory_sink.records)
+    logger.info("Errors: %s", [type(e.exception).__name__ for e in memory_sink.errors])
+    logger.info("Also written to: %s", json_path)
     logger.info(pipeline.format_profile(pipeline.get_profile_data(), blueprint=True))
 
 

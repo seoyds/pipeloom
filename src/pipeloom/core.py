@@ -369,7 +369,10 @@ class Pipeline:
         if self._dirty:
             self._rebuild()
         assert self._entry is not None
-        complete = [self._entry] + self._steps + self._sink_steps
+        # Sorted by stage for display -- self._steps is already ascending, but
+        # self._sink_steps (LOAD, typically) would otherwise land after the
+        # catch-all (stage MONITOR + 1) since it's appended last internally.
+        complete = sorted([self._entry] + self._steps + self._sink_steps, key=lambda s: s.stage)
         pipeline_entries = []
         for s in complete:
             emits = []
