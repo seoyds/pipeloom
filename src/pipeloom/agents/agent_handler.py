@@ -7,7 +7,7 @@ from google.protobuf import json_format
 from pydantic import BaseModel, ValidationError
 
 from pipeloom.core import Handler, step
-from pipeloom.events import Record, RawRecord
+from pipeloom.messages import Record, RawRecord
 from pipeloom.exceptions import PipelineFailed, PipelineStopped
 from pipeloom.stages import Stage
 
@@ -41,6 +41,11 @@ class AgentHandler(Handler):
     Any terminal failure — retryable-and-exhausted, or immediately for a
     non-retryable task state — raises AgentCallFailed; Pipeline.process's
     existing exception-to-ErrorMessage conversion handles the rest.
+
+    Retries send a fresh request with no idempotency key, so a retried call
+    against a non-idempotent agent (one that sends an email, charges a card,
+    etc.) can duplicate that side effect. Safe to use as-is against idempotent
+    agents; wrap payload.value with your own dedup key first otherwise.
     """
 
     def __init__(

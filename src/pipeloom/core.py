@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections.abc
 import inspect
 import itertools
 import time
@@ -9,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Callable, DefaultDict, Dict, List, Optional, Tuple, Type, Union
 
-from pipeloom.events import ErrorMessage, Message
+from pipeloom.messages import ErrorMessage, Message
 from pipeloom.exceptions import PipelineError, PipelineFailed, PipelineStopped, RoutingError
 from pipeloom.stages import Stage, get_stage_names
 
@@ -39,7 +40,9 @@ def _check_return_type(returns: Any) -> None:
     if returns in (None, type(None)):
         return
     origin = typing.get_origin(returns)
-    if origin in (list, typing.Iterable) or getattr(returns, "_name", None) in ("Iterable", "List"):
+    if origin in (list, collections.abc.Iterable, collections.abc.Sequence) or getattr(
+        returns, "_name", None
+    ) in ("Iterable", "List"):
         args = typing.get_args(returns)
         if args:
             _check_return_type(args[0])
@@ -53,6 +56,28 @@ def _check_return_type(returns: Any) -> None:
     if isinstance(returns, type) and issubclass(returns, Message):
         return
     raise AssertionError("@step has an unsupported return type")
+
+
+def _return_type_names(returns: Any) -> List[str]:
+    """Flatten a @step's return annotation (a Message subclass, an Iterable/List
+    of one, a Union of several, or None) into the Message class names it can
+    produce -- used to render the profiler's blueprint."""
+    if returns in (None, type(None)):
+        return []
+    origin = typing.get_origin(returns)
+    if origin in (list, collections.abc.Iterable, collections.abc.Sequence) or getattr(
+        returns, "_name", None
+    ) in ("Iterable", "List"):
+        args = typing.get_args(returns)
+        return _return_type_names(args[0]) if args else []
+    if origin is Union or origin is types.UnionType:
+        names: List[str] = []
+        for subtype in typing.get_args(returns):
+            names.extend(_return_type_names(subtype))
+        return names
+    if isinstance(returns, type) and issubclass(returns, Message):
+        return [returns.__name__]
+    return []
 
 
 def step(stage: int, consume: bool = False) -> Callable[[Callable], Callable]:
@@ -124,7 +149,7 @@ class Handler:
         return infos
 
 
-_CATCH_ALL_STAGE = Stage.MONITOR + 1  # reserved: user Handlers must not use this stage
+_CATCH_ALL_STAGE = Stage.MONITOR + 1  # placed after the sort so it always runs last, regardless of what stage a user Handler picks
 
 
 class _CatchAllHandler(Handler):
@@ -241,11 +266,11 @@ class Pipeline:
                         cache[key] = next_step
                     target = next_step
 
-                    start = time.time()
+                    start = time.perf_counter()
                     result = target.func(msg)
                     if inspect.isawaitable(result):
                         result = await result
-                    elapsed = time.time() - start
+                    elapsed = time.perf_counter() - start
 
                     self._total_calls[target.idx] += 1
                     self._total_time[target.idx] += elapsed
@@ -296,6 +321,10 @@ class Pipeline:
                 {
                     "name": s.name,
                     "stage": s.stage,
+                    "accepts": s.accepts.__name__,
+                    "returns": ",".join(_return_type_names(s.returns)),
+                    "consume": s.consume,
+                    "description": s.description,
                     "calls": self._total_calls[s.idx],
                     "time": self._total_time[s.idx],
                     "emitted": self._emitted_counts[s.idx],
@@ -304,19 +333,59 @@ class Pipeline:
             )
         return {"stages": list(self._stage_names), "pipeline": pipeline_entries}
 
-    def format_profile(self, profile: dict) -> str:
+    def format_profile(self, profile: dict, blueprint: bool = False) -> str:
+        """Render the profile as one line per step: timing/call-count always;
+        pass blueprint=True to also show each step's stage, accepted/emitted
+        types, consume flag, per-call latency, and docstring inline -- a
+        static picture of the pipeline's shape alongside the runtime numbers."""
         if not profile["pipeline"]:
             return "No Profile"
+        total_time = sum(e["time"] for e in profile["pipeline"]) or 1.0
+
+        if blueprint:
+            stages_asc = sorted(profile["stages"])
+
+            def stage_label(value: int) -> str:
+                label = f"ENTRY - {value}"
+                for stage_val, stage_name in stages_asc:
+                    if stage_val <= value:
+                        label = f"{stage_name} - {stage_val}"
+                    else:
+                        break
+                return label
+
+            name_width = max(len(f"{e['name']}({e['accepts']})") for e in profile["pipeline"])
+
+            lines = ["\n"]
+            current_stage = None
+            for entry in profile["pipeline"]:
+                label = stage_label(entry["stage"])
+                if label != current_stage:
+                    lines.append(f"STAGE: {label}")
+                    current_stage = label
+                pct = entry["time"] / total_time
+                full_name = f"{entry['name']}({entry['accepts']})"
+                consumed = "consumed" if entry["consume"] else ""
+                returns = entry["returns"] or "None"
+                percall_ms = (entry["time"] / entry["calls"] * 1000) if entry["calls"] else 0.0
+                lines.append(
+                    f"    {full_name.ljust(name_width)}  {consumed.ljust(9)} ---> {returns.ljust(20)} "
+                    f"{entry['time']:7.4f}s {pct:6.1%} {entry['calls']:>4} calls "
+                    f"{percall_ms:7.2f}ms/call -> {entry['emitted']:>4} emitted"
+                )
+                if entry["description"]:
+                    lines.append(f"        {entry['description']}")
+            return "\n".join(lines)
+
         lines = ["\n"]
         stages = sorted(profile["stages"], reverse=True)
-        total_time = sum(e["time"] for e in profile["pipeline"]) or 1.0
         for entry in profile["pipeline"]:
             while stages and stages[-1][0] <= entry["stage"]:
                 stage_val, stage_name = stages.pop()
                 lines.append(f"[ {stage_name} = {stage_val} ]".ljust(50, "-"))
             pct = entry["time"] / total_time
             lines.append(
-                f"{entry['name'].ljust(40)} {entry['time']:.4f}s {pct:.1%} "
-                f"{entry['calls']} calls -> {entry['emitted']} emitted"
+                f"{entry['name'].ljust(40)} {entry['time']:7.4f}s {pct:6.1%} "
+                f"{entry['calls']:>4} calls -> {entry['emitted']:>4} emitted"
             )
         return "\n".join(lines)

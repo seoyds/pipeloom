@@ -1,3 +1,4 @@
+import collections.abc
 import signal
 from contextlib import contextmanager
 from typing import Iterable
@@ -5,7 +6,7 @@ from typing import Iterable
 import pytest
 
 from pipeloom.core import Handler, Pipeline, step
-from pipeloom.events import ErrorMessage, Message, RawRecord, Record
+from pipeloom.messages import ErrorMessage, Message, RawRecord, Record
 from pipeloom.exceptions import PipelineError, PipelineFailed, RoutingError
 from pipeloom.stages import Stage
 
@@ -330,6 +331,37 @@ async def test_generator_step_fans_out_in_order():
     await pipeline.process(RawRecord(value={}, time=0.0))
 
     assert collector.received == [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.asyncio
+async def test_format_profile_blueprint_shows_types_and_docstring():
+    class Documented(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Record:
+            """Uppercases every field."""
+            return Record({k: str(v).upper() for k, v in message.value.items()})
+
+    pipeline = Pipeline()
+    pipeline.add_handler(Documented())
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+
+    output = pipeline.format_profile(pipeline.get_profile_data(), blueprint=True)
+
+    assert "Documented.go(RawRecord)" in output
+    assert "consumed" in output
+    assert "Record" in output
+    assert "ms/call" in output
+    assert "Uppercases every field." in output
+
+
+def test_step_accepts_collections_abc_iterable_return_annotation():
+    class AbcIterableFanOut(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> collections.abc.Iterable[Record]:
+            return [Record({"ok": True})]
+
+    # Must not raise AssertionError at decoration time.
+    AbcIterableFanOut()
 
 
 @pytest.mark.asyncio

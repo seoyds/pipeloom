@@ -1,9 +1,11 @@
+import asyncio
+
 import pytest
 
 from pipeloom.core import Handler, Pipeline, step
 from pipeloom.dataio.sinks import InMemorySink
-from pipeloom.dataio.sources import IterableSource
-from pipeloom.events import Checkpoint, RawRecord, Record, Shutdown
+from pipeloom.dataio.sources import IterableSource, Source
+from pipeloom.messages import Checkpoint, RawRecord, Record, Shutdown, Tick
 from pipeloom.exceptions import PipelineStopped
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
@@ -112,3 +114,49 @@ async def test_full_run_emits_checkpoint_then_shutdown():
     await run(IterableSource([{"name": "ada"}]), pipeline)
 
     assert recorder.seen == ["Checkpoint", "Shutdown"]
+
+
+class SlowSource:
+    """Yields one record per item, sleeping between them so run()'s
+    per-record tick_interval check gets a chance to fire more than once."""
+
+    def __init__(self, values: list, delay: float) -> None:
+        self._values = values
+        self._delay = delay
+
+    async def get_records(self):
+        for value in self._values:
+            await asyncio.sleep(self._delay)
+            yield RawRecord(value=value, time=0.0)
+
+
+class TickRecorder(Handler):
+    def __init__(self) -> None:
+        self.ticks = 0
+
+    @step(Stage.MONITOR)
+    def on_tick(self, message: Tick) -> None:
+        self.ticks += 1
+
+
+@pytest.mark.asyncio
+async def test_run_injects_ticks_at_the_given_interval():
+    source: Source = SlowSource([{"n": 1}, {"n": 2}, {"n": 3}], delay=0.02)
+    pipeline = Pipeline()
+    recorder = TickRecorder()
+    pipeline.add_handler(recorder)
+
+    await run(source, pipeline, tick_interval=0.01)
+
+    assert recorder.ticks >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_with_no_tick_interval_never_emits_a_tick():
+    pipeline = Pipeline()
+    recorder = TickRecorder()
+    pipeline.add_handler(recorder)
+
+    await run(IterableSource([{"name": "ada"}]), pipeline)
+
+    assert recorder.ticks == 0
