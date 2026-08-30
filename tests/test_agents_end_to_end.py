@@ -62,4 +62,7 @@ async def test_pipeline_routes_an_agent_failure_to_the_error_sink_and_continues(
 
     assert sink.records == []
     assert len(sink.errors) == 1
+    # Both paths: the spec's contract is ErrorMessage.reason, but keep the
+    # through-the-exception assertion so a regression on either is caught.
+    assert sink.errors[0].reason == "input_required"
     assert sink.errors[0].exception.reason == "input_required"

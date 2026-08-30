@@ -64,6 +64,22 @@ class ErrorCollector(Handler):
         self.errors.append(message)
 
 
+class _ReasonedError(Exception):
+    """Stands in for any exception exposing a .reason attribute (as
+    pipeloom.agents' AgentCallFailed does), without importing the agents
+    package -- core must stay agent-agnostic."""
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class FailingWithReason(Handler):
+    @step(Stage.TRANSFORM, consume=True)
+    def go(self, message: RawRecord) -> Record:
+        raise _ReasonedError("boom", reason="input_required")
+
+
 @pytest.mark.asyncio
 async def test_message_routes_through_handlers_by_type():
     pipeline = Pipeline()
@@ -88,6 +104,32 @@ async def test_exception_in_a_step_becomes_an_error_message_downstream():
     assert len(error_collector.errors) == 1
     assert isinstance(error_collector.errors[0].exception, ValueError)
     assert str(error_collector.errors[0].exception) == "boom"
+
+
+@pytest.mark.asyncio
+async def test_error_message_carries_reason_from_an_exception_that_exposes_one():
+    pipeline = Pipeline()
+    error_collector = ErrorCollector()
+    pipeline.add_handler(FailingWithReason())
+    pipeline.add_handler(error_collector)
+
+    await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert len(error_collector.errors) == 1
+    assert error_collector.errors[0].reason == "input_required"
+
+
+@pytest.mark.asyncio
+async def test_error_message_reason_is_none_for_an_exception_without_one():
+    pipeline = Pipeline()
+    error_collector = ErrorCollector()
+    pipeline.add_handler(Failing())  # raises a plain ValueError
+    pipeline.add_handler(error_collector)
+
+    await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert len(error_collector.errors) == 1
+    assert error_collector.errors[0].reason is None
 
 
 @pytest.mark.asyncio

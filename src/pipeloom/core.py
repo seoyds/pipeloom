@@ -273,7 +273,9 @@ class Pipeline:
             except (PipelineStopped, PipelineFailed):
                 raise
             except Exception as exc:
-                error_message = ErrorMessage(message=msg, exception=exc)
+                # getattr keeps this duck-typed: any exception exposing .reason
+                # surfaces it, with no import of anything agent-specific.
+                error_message = ErrorMessage(message=msg, exception=exc, reason=getattr(exc, "reason", None))
                 stack.append((target, error_message))
 
     def get_profile_data(self) -> dict:
