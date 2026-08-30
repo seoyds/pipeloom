@@ -6,8 +6,11 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "aiosqlite>=0.20"]
 agents = ["a2a-sdk>=1.1.2", "pydantic>=2"]
+parquet = ["pyarrow>=14"]
+kafka = ["confluent-kafka>=2.3"]
+db = ["sqlalchemy[asyncio]>=2.0"]
 
 [build-system]
 requires = ["hatchling"]
