@@ -100,6 +100,7 @@ class AgentHandler(Handler):
         self.metrics.calls += 1
         attempt = 0
         reason = "timeout"
+        last_exc: Optional[BaseException] = None
         while True:
             attempt += 1
             self.metrics.total_attempts += 1
@@ -112,16 +113,23 @@ class AgentHandler(Handler):
                 raise
             except AttemptFailed as exc:
                 reason = exc.reason
+                last_exc = exc
             except (PipelineStopped, PipelineFailed, asyncio.CancelledError):
                 raise
-            except Exception:
+            except (OSError, asyncio.TimeoutError) as exc:
                 reason = "timeout"
+                last_exc = exc
+            except Exception as exc:
+                # A bug or an incompatible a2a-sdk response shape -- not a
+                # transport failure, so don't report it to the operator as one.
+                reason = "internal_error"
+                last_exc = exc
             if attempt >= self._retry_policy.max_attempts:
                 self.metrics.failures += 1
                 raise AgentCallFailed(
                     reason=reason,
                     message=f"Agent call did not succeed after {attempt} attempt(s); last reason: {reason}",
-                )
+                ) from last_exc
             await asyncio.sleep(compute_backoff_delay(self._retry_policy, attempt))
 
     @step(Stage.AGENT, consume=True)

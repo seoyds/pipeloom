@@ -120,6 +120,37 @@ async def test_call_retries_on_raw_exception_then_raises_timeout_reason():
 
 
 @pytest.mark.asyncio
+async def test_call_labels_an_unexpected_exception_internal_error_rather_than_timeout():
+    # A RuntimeError is neither OSError nor asyncio.TimeoutError -- it is a bug,
+    # not a transport failure, and must not be reported to the operator as one.
+    client = FakeClient([RuntimeError("sdk shape changed"), RuntimeError("sdk shape changed")])
+    handler = AgentHandler(
+        agent_url="https://example.invalid/agent", client=client, retry_policy=_fast_retry_policy(2)
+    )
+
+    with pytest.raises(AgentCallFailed) as exc_info:
+        await handler.call(RawRecord(value={}, time=0.0))
+
+    assert exc_info.value.reason == "internal_error"
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_call_failed_chains_the_exception_that_caused_it():
+    client = FakeClient([RuntimeError("sdk shape changed")])
+    handler = AgentHandler(
+        agent_url="https://example.invalid/agent", client=client, retry_policy=_fast_retry_policy(1)
+    )
+
+    with pytest.raises(AgentCallFailed) as exc_info:
+        await handler.call(RawRecord(value={}, time=0.0))
+
+    cause = exc_info.value.__cause__
+    assert isinstance(cause, RuntimeError)
+    assert str(cause) == "sdk shape changed"
+
+
+@pytest.mark.asyncio
 async def test_call_raises_agent_call_failed_when_stream_never_reaches_terminal_state():
     client = FakeClient([[task_event(TaskState.TASK_STATE_WORKING)]])
     handler = AgentHandler(
