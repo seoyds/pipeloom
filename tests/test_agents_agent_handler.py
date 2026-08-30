@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from pipeloom.agents.agent_handler import AgentHandler
 from pipeloom.agents.exceptions import AgentCallFailed
 from pipeloom.agents.retry import RetryPolicy
-from pipeloom.events import RawRecord
+from pipeloom.messages import RawRecord
 from tests.agent_test_helpers import FakeClient, task_event, text_artifact
 
 

@@ -6,7 +6,7 @@ from pipeloom.agents.retry import RetryPolicy
 from pipeloom.core import Handler, Pipeline, step
 from pipeloom.dataio.sinks import InMemorySink
 from pipeloom.dataio.sources import IterableSource
-from pipeloom.events import RawRecord
+from pipeloom.messages import RawRecord
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
 from tests.agent_test_helpers import FakeClient, task_event, text_artifact

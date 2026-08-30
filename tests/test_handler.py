@@ -3,7 +3,7 @@ import typing
 import pytest
 
 from pipeloom.core import step, Handler, StepInfo
-from pipeloom.events import ErrorMessage, Message, RawRecord, Record
+from pipeloom.messages import ErrorMessage, Message, RawRecord, Record
 from pipeloom.stages import Stage
 
 

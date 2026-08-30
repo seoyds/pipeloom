@@ -1,6 +1,6 @@
 import time as time_module
 
-from pipeloom.events import (
+from pipeloom.messages import (
     Message,
     RawRecord,
     Record,
