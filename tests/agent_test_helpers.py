@@ -16,6 +16,13 @@ class FakeClient:
     to raise instead of yielding anything. If send_message is called more
     times than there are items, the last item is reused for every call
     beyond the list's length.
+
+    Each call yields fresh copies of its scripted events. collect_terminal_task
+    accumulates by mutating the Task it gets from the stream's first "task"
+    event in place, which is correct against a real client (every attempt is
+    deserialized anew off the wire) but would otherwise let one attempt rewrite
+    the script for the next -- a retried multi-event stream would start its
+    second attempt already terminal.
     """
 
     def __init__(self, responses: List[Union[List[StreamResponse], BaseException]]) -> None:
@@ -29,7 +36,9 @@ class FakeClient:
         if isinstance(item, BaseException):
             raise item
         for event in item:
-            yield event
+            fresh = type(event)()
+            fresh.CopyFrom(event)
+            yield fresh
 
 
 def task_event(state, artifacts=None, task_id: str = "task-1") -> StreamResponse:

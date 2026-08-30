@@ -88,6 +88,39 @@ async def test_collect_terminal_task_accumulates_artifact_updates():
 
 
 @pytest.mark.asyncio
+async def test_each_call_replays_the_scripted_stream_unmutated():
+    # collect_terminal_task accumulates by mutating the Task from the first
+    # "task" event in place. In production every attempt gets a freshly
+    # deserialized stream, so FakeClient must hand out copies too -- otherwise a
+    # retried multi-event stream starts attempt 2 already terminal and silently
+    # skips the accumulation it claims to exercise.
+    events = [
+        task_event(TaskState.TASK_STATE_SUBMITTED),
+        StreamResponse(artifact_update=TaskArtifactUpdateEvent(
+            task_id="task-1", artifact=text_artifact('{"x": 1}')
+        )),
+        StreamResponse(status_update=TaskStatusUpdateEvent(
+            task_id="task-1", status=TaskStatus(state=TaskState.TASK_STATE_COMPLETED)
+        )),
+    ]
+    client = FakeClient([events])
+
+    first = await collect_terminal_task(client, build_request({}))
+    second = await collect_terminal_task(client, build_request({}))
+
+    assert client.calls == 2
+    assert first is not second
+    for task in (first, second):
+        assert task.status.state == TaskState.TASK_STATE_COMPLETED
+        assert len(task.artifacts) == 1
+        assert task.artifacts[0].parts[0].text == '{"x": 1}'
+    # The script itself is untouched, so a third attempt would still start from
+    # SUBMITTED with no artifacts.
+    assert events[0].task.status.state == TaskState.TASK_STATE_SUBMITTED
+    assert len(events[0].task.artifacts) == 0
+
+
+@pytest.mark.asyncio
 async def test_collect_terminal_task_raises_attempt_failed_when_stream_ends_without_terminal_state():
     events = [task_event(TaskState.TASK_STATE_WORKING)]
     client = FakeClient([events])
