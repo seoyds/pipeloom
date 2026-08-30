@@ -1,9 +1,37 @@
+import signal
+from contextlib import contextmanager
+from typing import Iterable
+
 import pytest
 
 from pipeloom.core import Handler, Pipeline, step
 from pipeloom.events import ErrorMessage, Message, RawRecord, Record
-from pipeloom.exceptions import PipelineFailed, RoutingError
+from pipeloom.exceptions import PipelineError, PipelineFailed, RoutingError
 from pipeloom.stages import Stage
+
+
+class _TookTooLong(BaseException):
+    # BaseException, not Exception: process()'s own `except Exception` would
+    # otherwise swallow the alarm and keep spinning.
+    pass
+
+
+@contextmanager
+def must_not_hang(seconds: float = 5.0):
+    # process() spins in pure Python with no await point, so an infinite loop
+    # cannot be interrupted by asyncio.wait_for -- SIGALRM is what gets through.
+    def _alarm(signum, frame):
+        raise _TookTooLong
+
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    except _TookTooLong:
+        pytest.fail(f"process() did not return within {seconds}s")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 class Uppercase(Handler):
@@ -149,3 +177,127 @@ async def test_format_profile_produces_a_readable_string():
     profile = pipeline.get_profile_data()
     output = pipeline.format_profile(profile)
     assert "Uppercase.go" in output
+
+
+@pytest.mark.asyncio
+async def test_format_profile_emits_stage_banners_by_default():
+    pipeline = Pipeline()
+    pipeline.add_handler(Uppercase())
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+    output = pipeline.format_profile(pipeline.get_profile_data())
+    assert "[ TRANSFORM = 40 ]" in output
+
+
+@pytest.mark.asyncio
+async def test_step_returning_a_bare_dict_errors_instead_of_hanging():
+    class ForgotToWrap(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Record:
+            return {"a": 1}  # forgot Record(...)
+
+    pipeline = Pipeline()
+    errors = ErrorCollector()
+    pipeline.add_handler(ForgotToWrap())
+    pipeline.add_handler(errors)
+
+    with must_not_hang():
+        await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert len(errors.errors) == 1
+    exc = errors.errors[0].exception
+    assert isinstance(exc, PipelineError)
+    assert "ForgotToWrap.go" in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_step_returning_a_list_with_a_non_message_errors_instead_of_hanging():
+    class MixedFanOut(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Iterable[Record]:
+            return [Record({"ok": True}), "not a message"]
+
+    pipeline = Pipeline()
+    errors = ErrorCollector()
+    pipeline.add_handler(MixedFanOut())
+    pipeline.add_handler(errors)
+
+    with must_not_hang():
+        await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert len(errors.errors) == 1
+    exc = errors.errors[0].exception
+    assert isinstance(exc, PipelineError)
+    assert "MixedFanOut.go" in str(exc)
+    assert "not a message" in str(exc)
+
+
+@pytest.mark.asyncio
+async def test_default_consume_false_requeues_the_original_message():
+    class Observe(Handler):
+        def __init__(self) -> None:
+            self.seen: list = []
+
+        @step(Stage.VALIDATE)  # default consume=False
+        def observe(self, message: RawRecord) -> None:
+            self.seen.append(dict(message.value))
+
+    pipeline = Pipeline()
+    observer = Observe()
+    collector = Collector()
+    pipeline.add_handler(observer)
+    pipeline.add_handler(Uppercase())
+    pipeline.add_handler(collector)
+
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+
+    assert observer.seen == [{"a": "x"}]
+    # The RawRecord was re-queued after the non-consuming step and kept routing.
+    assert collector.received == [{"a": "X"}]
+
+
+@pytest.mark.asyncio
+async def test_step_returning_an_iterable_fans_out_in_order():
+    class FanOut(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Iterable[Record]:
+            return [Record({"n": 1}), Record({"n": 2}), Record({"n": 3})]
+
+    pipeline = Pipeline()
+    collector = Collector()
+    pipeline.add_handler(FanOut())
+    pipeline.add_handler(collector)
+
+    await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert collector.received == [{"n": 1}, {"n": 2}, {"n": 3}]
+
+
+@pytest.mark.asyncio
+async def test_generator_step_fans_out_in_order():
+    class GeneratorFanOut(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Iterable[Record]:
+            for n in (1, 2):
+                yield Record({"n": n})
+
+    pipeline = Pipeline()
+    collector = Collector()
+    pipeline.add_handler(GeneratorFanOut())
+    pipeline.add_handler(collector)
+
+    await pipeline.process(RawRecord(value={}, time=0.0))
+
+    assert collector.received == [{"n": 1}, {"n": 2}]
+
+
+@pytest.mark.asyncio
+async def test_handlers_run_in_stage_order_regardless_of_registration_order():
+    pipeline = Pipeline()
+    collector = Collector()  # Stage.LOAD
+    pipeline.add_handler(collector)
+    pipeline.add_handler(Uppercase())  # Stage.TRANSFORM, registered second
+
+    await pipeline.process(RawRecord(value={"a": "x"}, time=0.0))
+
+    assert [s.name for s in pipeline._steps[:2]] == ["Uppercase.go", "Collector.collect"]
+    assert collector.received == [{"a": "X"}]

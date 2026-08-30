@@ -1,7 +1,9 @@
+import typing
+
 import pytest
 
 from pipeloom.core import step, Handler, StepInfo
-from pipeloom.events import Message, RawRecord, Record
+from pipeloom.events import ErrorMessage, Message, RawRecord, Record
 from pipeloom.stages import Stage
 
 
@@ -77,3 +79,30 @@ def test_step_requires_message_subclass_argument():
             @step(Stage.EXTRACT)
             def go(self, message: int) -> None:
                 return None
+
+
+def test_step_accepts_a_pep604_union_return_type():
+    class Pep604(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> Record | ErrorMessage:
+            return Record(message.value)
+
+    assert Pep604().get_steps()[0].returns == Record | ErrorMessage
+
+
+def test_step_accepts_a_typing_union_return_type():
+    class TypingUnion(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> typing.Union[Record, ErrorMessage]:
+            return Record(message.value)
+
+    assert TypingUnion().get_steps()[0].returns == typing.Union[Record, ErrorMessage]
+
+
+def test_step_accepts_an_optional_return_type():
+    class OptionalReturn(Handler):
+        @step(Stage.TRANSFORM, consume=True)
+        def go(self, message: RawRecord) -> typing.Optional[Record]:
+            return None
+
+    assert OptionalReturn().get_steps()[0].returns == typing.Optional[Record]

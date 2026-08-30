@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import itertools
 import time
+import types
 import typing
 from collections import defaultdict
 from dataclasses import dataclass
@@ -43,7 +44,9 @@ def _check_return_type(returns: Any) -> None:
         if args:
             _check_return_type(args[0])
         return
-    if origin is Union:
+    # PEP 604 unions (Record | ErrorMessage) report types.UnionType as their
+    # origin, not typing.Union, on every Python before 3.14.
+    if origin is Union or origin is types.UnionType:
         for subtype in typing.get_args(returns):
             _check_return_type(subtype)
         return
@@ -87,6 +90,8 @@ def step(stage: int, consume: bool = False) -> Callable[[Callable], Callable]:
 
 
 class Handler:
+    """A unit of pipeline logic; groups one or more @step methods."""
+
     def __str__(self) -> str:
         return self.__class__.__name__
 
@@ -137,6 +142,9 @@ class _CatchAllHandler(Handler):
 
 
 class Pipeline:
+    """Flattens the @step methods of its Handlers into one stage-ordered chain
+    and drives Messages through it."""
+
     def __init__(self) -> None:
         self._handlers: List[Handler] = []
         self._catch_all = _CatchAllHandler()
@@ -148,9 +156,10 @@ class Pipeline:
         self._total_time: List[float] = []
         self._emitted_counts: List[int] = []
         self._message_tallies: List[DefaultDict[Type[Message], int]] = []
-        self._stage_names: List[Tuple[int, str]] = []
+        self._stage_names: List[Tuple[int, str]] = get_stage_names(Stage)
 
     def set_stage_labels(self, stage_cls: Type) -> None:
+        """Relabel the profiler's stage banners for a custom Stage class."""
         self._stage_names = get_stage_names(stage_cls)
 
     def add_handler(self, handler: Handler) -> None:
@@ -203,10 +212,17 @@ class Pipeline:
         raise RoutingError(f"No handler found for message type {message_type.__name__}")
 
     async def process(self, message: Message) -> None:
+        """Route a Message through the pipeline by type: each step runs when the
+        message matches its annotated argument. A consume=True step swallows its
+        input; otherwise the input is re-queued and keeps routing downstream. An
+        exception inside a step becomes an ErrorMessage that continues routing
+        from the failing step, so failures travel as data."""
         if self._dirty:
             self._rebuild()
         assert self._entry is not None
 
+        # Invariant the error recovery below depends on for progress: every value
+        # on the stack is a Message, and `target` always holds a live StepInfo.
         stack: List[Tuple[StepInfo, Message]] = [(self._entry, message)]
         cache = self._next_step_cache
         target = self._entry
@@ -219,10 +235,11 @@ class Pipeline:
                     msg_type = type(msg)
                     self._message_tallies[producer.idx][msg_type] += 1
                     key = (producer, msg_type)
-                    target = cache.get(key)
-                    if target is None:
-                        target = self._find_next(producer, msg_type)
-                        cache[key] = target
+                    next_step = cache.get(key)
+                    if next_step is None:
+                        next_step = self._find_next(producer, msg_type)  # may raise
+                        cache[key] = next_step
+                    target = next_step
 
                     start = time.time()
                     result = target.func(msg)
@@ -243,6 +260,12 @@ class Pipeline:
                         stack.append((target, result))
                     elif hasattr(result, "__iter__"):
                         results = list(result)
+                        for r in results:
+                            if not isinstance(r, Message):
+                                raise PipelineError(
+                                    f"{target} returned an iterable containing a "
+                                    f"non-Message value: {r!r}"
+                                )
                         self._emitted_counts[target.idx] += len(results)
                         stack.extend((target, r) for r in reversed(results))
                     else:
