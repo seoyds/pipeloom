@@ -169,6 +169,51 @@ class Handler:
         return infos
 
 
+class Batcher(Handler):
+    """Base class for a Handler that re-groups individual Messages into
+    fixed-size batches -- the inverse of a step that fans a batch out into
+    items (return Iterable[Message] from an ordinary @step; see
+    examples/sample_pipeline_batching.py). Not itself @step-decorated: a
+    Handler's steps must be defined in non-decreasing stage order (see
+    get_steps above), and only the subclass knows what stage its own steps
+    belong at, so it wires accumulate()/flush() into its own @step methods.
+
+    Subclass, implement make_batch(items), then add:
+    - one @step(consume=True) accepting your item type, returning
+      Optional[YourBatchType], that calls self.accumulate(message)
+    - one @step(consume=False) accepting Checkpoint (and, for early-stop
+      safety, another accepting Shutdown -- PipelineStopped skips Checkpoint
+      but Shutdown always fires), also returning Optional[YourBatchType],
+      that calls self.flush() so a trailing partial batch is never dropped
+    """
+
+    def __init__(self, batch_size: int) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
+        self._batch_size = batch_size
+        self._buffer: List[Message] = []
+
+    def accumulate(self, item: Message) -> Optional[Message]:
+        """Append item to the buffer. Once batch_size is reached, clears the
+        buffer and returns the built batch Message; otherwise returns None."""
+        self._buffer.append(item)
+        if len(self._buffer) >= self._batch_size:
+            return self.flush()
+        return None
+
+    def flush(self) -> Optional[Message]:
+        """Return any buffered items as one batch Message, clearing the
+        buffer -- or None if the buffer is empty."""
+        if not self._buffer:
+            return None
+        items, self._buffer = self._buffer, []
+        return self.make_batch(items)
+
+    def make_batch(self, items: List[Message]) -> Message:
+        """Override to build the batch Message from buffered items."""
+        raise NotImplementedError
+
+
 _CATCH_ALL_STAGE = Stage.MONITOR + 1  # placed after the sort so it always runs last, regardless of what stage a user Handler picks
 
 

@@ -1,6 +1,6 @@
 """Pipeloom: an async ETL pipeline where steps may be local code or AI agents."""
 
-from pipeloom.core import Handler, Pipeline, step
+from pipeloom.core import Batcher, Handler, Pipeline, step
 from pipeloom.exceptions import PipelineError, PipelineFailed, PipelineStopped, RoutingError
 from pipeloom.messages import (
     Checkpoint,
@@ -17,6 +17,7 @@ from pipeloom.stages import Stage
 
 __all__ = [
     "Handler",
+    "Batcher",
     "Pipeline",
     "step",
     "run",

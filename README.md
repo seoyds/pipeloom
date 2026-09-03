@@ -82,6 +82,53 @@ to run or debug it directly.
   successfully. Pass `tick_interval` (seconds) to also inject `Tick`
   messages between records, for monitoring Handlers (see below).
 
+## Batching
+
+A pipeline can shrink and expand as it flows -- e.g. a step calls an API in
+bulk and gets one batched response back, but everything downstream needs to
+work row by row; a later step needs to call a *different* bulk API, so those
+rows need re-grouping into batches again. Two different mechanisms, one for
+each direction:
+
+- **Batch -> items ("shrink")** -- no special class needed. An ordinary
+  `@step` returning `Iterable[Message]` (a list, or a generator) fans out:
+  each yielded `Message` gets routed downstream independently.
+
+  ```python
+  @step(Stage.VALIDATE, consume=True)
+  def explode(self, message: RawRecord) -> Iterable[Record]:
+      for item in message.value["items"]:
+          yield Record(item)
+  ```
+
+- **Items -> batch ("expand")** -- needs state carried across many `@step`
+  calls, so it uses `Batcher`: subclass it, implement `make_batch(items)`,
+  then add your own `@step` methods that call `self.accumulate(message)` for
+  the item type (`consume=True`) and `self.flush()` for `Checkpoint` (and
+  `Shutdown`, as a safety net for an early `PipelineStopped`, which skips
+  `Checkpoint`) so a trailing partial batch is never silently dropped:
+
+  ```python
+  class RecordBatcher(Batcher):
+      def make_batch(self, items: List[Message]) -> RecordBatch:
+          return RecordBatch(list(items))
+
+      @step(Stage.TRANSFORM, consume=True)
+      def on_item(self, message: Record) -> Optional[RecordBatch]:
+          return self.accumulate(message)
+
+      @step(Stage.TRANSFORM, consume=False)
+      def on_checkpoint(self, message: Checkpoint) -> Optional[RecordBatch]:
+          return self.flush()
+
+      @step(Stage.TRANSFORM, consume=False)
+      def on_shutdown(self, message: Shutdown) -> Optional[RecordBatch]:
+          return self.flush()
+  ```
+
+See `examples/sample_pipeline_batching.py` for a runnable version combining
+both directions, plus `.vscode/launch.json` to run or debug it directly.
+
 ## Sinks
 
 A sink is a plain class with one `write(message)` method -- no `@step`, no
@@ -253,6 +300,7 @@ agent and drop `client=` to use it for real.
 ```bash
 uv run pytest -q                              # full suite
 PYTHONPATH=src uv run python examples/sample_pipeline.py
+PYTHONPATH=src uv run python examples/sample_pipeline_batching.py
 PYTHONPATH=src uv run python examples/sample_pipeline_service.py
 PYTHONPATH=src uv run python examples/sample_pipeline_agent.py
 ```
