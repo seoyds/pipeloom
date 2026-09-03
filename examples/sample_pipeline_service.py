@@ -13,6 +13,7 @@ serial execution).
 
 import asyncio
 import logging
+from typing import Iterable
 
 from pipeloom.core import Handler, Pipeline, step
 from pipeloom.dataio.sinks import InMemorySink  # noqa: F401 -- registers sink_type= "memory"
@@ -34,10 +35,11 @@ class FailOnEmpty(Handler):
 
 class UppercaseTransform(Handler):
     @step(Stage.TRANSFORM, consume=True)
-    def go(self, message: RawRecord) -> Record:
+    def go(self, message: RawRecord) -> Iterable[Record]:
         if message.value.get("name") == "poison":
             raise PipelineFailed("simulated fatal failure")  # bypasses errors-as-data entirely
-        return Record({k: str(v).upper() for k, v in message.value.items()})
+        yield Record({k: str(v).upper() for k, v in message.value.items()})
+        yield Record({k: str(v).upper() for k, v in {'a': 1, 'b': 2}.items()})  # extra Record to show multiple outputs per input
 
 
 async def main() -> None:
