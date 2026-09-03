@@ -168,6 +168,45 @@ pipeline.add_sink(sink_type="rdb", sink_trigger=Record, sink_params={
 `CSVSource(path)` -- all implement `Source.get_records() ->
 AsyncIterator[RawRecord]`.
 
+## Service (request/response) (`pipeloom.service`)
+
+`run()` drives a `Pipeline` end-to-end over a `Source` until exhausted.
+`PipelineService` instead lets you embed an existing `Pipeline` behind a
+request/response call -- feed it one row, get back exactly what that row
+produced:
+
+```python
+from pipeloom.service import PipelineService
+
+service = PipelineService(pipeline)
+records = await service.process_one({"name": "ada", "role": "engineer"})
+# records: every Record/ErrorMessage that row produced, in emission order
+```
+
+- **Non-blocking front door, serial execution**: `process_one` calls never
+  block on each other -- each row is queued immediately -- but internally a
+  single worker loop processes one row at a time through the pipeline's
+  step chain, so no two rows' steps ever overlap. This preserves every
+  `Handler`'s single-consumer assumption (safe mutable instance state)
+  exactly as `run()` does; it does not add pipeline-level concurrency.
+- **Row-scoped fatal errors**: a `PipelineStopped` or `PipelineFailed`
+  raised while processing a submitted row fails only that row's
+  `process_one` call -- the service keeps serving rows submitted
+  afterward. This diverges from `run()`, where the same exceptions end the
+  whole run.
+- **No shutdown needed**: a persistent service has no natural
+  "exhausted" point, so there's no equivalent of `run()`'s final
+  `Checkpoint`/`Shutdown` -- keep calling `process_one` for as long as rows
+  arrive.
+- Internally, `PipelineService` registers its own `add_sink`-based
+  collector to correlate results with the submitting row; any other sinks
+  already registered on the pipeline keep receiving every message exactly
+  as they would under `run()`.
+
+See `examples/sample_pipeline_service.py` for a runnable version (errors as
+data vs. a row-scoped fatal error, a coexisting sink, and concurrent
+submissions still processed serially).
+
 ## Profiling
 
 ```python
@@ -203,12 +242,20 @@ response against `output_schema` (a Pydantic model) before emitting a
 `Record`. Retries have no idempotency key -- safe against idempotent agents,
 risky otherwise.
 
+See `examples/sample_pipeline_agent.py` for a runnable version (a local
+step composed with an agent-backed step, output schema validation, and a
+non-retryable agent failure routed to an ErrorMessage) -- it fakes the A2A
+client so it runs with no network dependency; point `agent_url` at a real
+agent and drop `client=` to use it for real.
+
 ## Development
 
 ```bash
 uv run pytest -q                              # full suite
 PYTHONPATH=src uv run python examples/sample_pipeline.py
+PYTHONPATH=src uv run python examples/sample_pipeline_service.py
+PYTHONPATH=src uv run python examples/sample_pipeline_agent.py
 ```
 
-VS Code users: `.vscode/launch.json` has configs to run/debug the sample
-pipeline, the current file, or the test suite under the debugger.
+VS Code users: `.vscode/launch.json` has configs to run/debug any of the
+sample pipelines, the current file, or the test suite under the debugger.

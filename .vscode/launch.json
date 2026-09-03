@@ -15,6 +15,32 @@
       "justMyCode": true
     },
     {
+      "name": "Python: Sample Pipeline Service",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/sample_pipeline_service.py",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "justMyCode": true
+    },
+    {
+      "name": "Python: Sample Pipeline Agent",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/examples/sample_pipeline_agent.py",
+      "console": "integratedTerminal",
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      },
+      "justMyCode": true
+    },
+    {
       "name": "Python: Current File",
       "type": "debugpy",
       "request": "launch",
