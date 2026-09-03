@@ -13,7 +13,7 @@ from pathlib import Path
 from pipeloom.core import Handler, Pipeline, step
 from pipeloom.dataio.sinks import InMemorySink, JSONLinesSink  # noqa: F401 -- registers sink_type= "memory"/"json"
 from pipeloom.dataio.sources import IterableSource
-from pipeloom.messages import ErrorMessage, RawRecord, Record
+from pipeloom.messages import ErrorMessage, Message, RawRecord, Record
 from pipeloom.pipeline import run
 from pipeloom.stages import Stage
 
@@ -28,10 +28,25 @@ class FailOnEmpty(Handler):
         return message
 
 
+class Uppercased(Message, dict):
+    """Intermediate type between UppercaseTransform's two steps.
+
+    Sinks match by message type globally, not by chain position -- if
+    `uppercase` returned a `Record` directly, the sink_trigger=Record sinks
+    below would consume it immediately, and `lowercase` would never see it.
+    Routing an intermediate type through first, and only producing `Record`
+    from the final step, is what lets both steps in this one handler run.
+    """
+
+
 class UppercaseTransform(Handler):
     @step(Stage.TRANSFORM, consume=True)
-    def go(self, message: RawRecord) -> Record:
-        return Record({k: str(v).upper() for k, v in message.value.items()})
+    def uppercase(self, message: RawRecord) -> Uppercased:
+        return Uppercased({k: str(v).upper() for k, v in message.value.items()})
+
+    @step(Stage.TRANSFORM, consume=True)
+    def lowercase(self, message: Uppercased) -> Record:
+        return Record({k: str(v).lower() for k, v in message.items()})
 
 
 async def main() -> None:
