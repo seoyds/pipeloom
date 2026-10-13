@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Pipeloom Architecture",
+    "output": "pipeloom.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    { "id": "source", "type": "external", "label": "Source", "sublabel": "Iterable / JSONLines / CSV", "pos": [40, 300], "size": [150, 64] },
+    { "id": "runner", "type": "backend", "label": "run() / PipelineService", "sublabel": "feeds messages", "pos": [260, 300], "size": [170, 64] },
+    { "id": "pipeline", "type": "backend", "label": "Pipeline", "sublabel": "stage-ordered router", "pos": [510, 300], "size": [150, 64] },
+    { "id": "sinks", "type": "backend", "label": "Sinks", "sublabel": "InMemory / JSONLines / CSV", "pos": [750, 300], "size": [160, 64] },
+    { "id": "extsinks", "type": "database", "label": "Parquet / Kafka / DB", "sublabel": "optional extras", "pos": [980, 300], "size": [160, 64] },
+    { "id": "monitor", "type": "backend", "label": "RateMonitor", "sublabel": "PipelineProfiler", "pos": [510, 70], "size": [150, 64] },
+    { "id": "handlers", "type": "backend", "label": "Handlers", "sublabel": "@step methods by Stage", "pos": [510, 530], "size": [150, 64] },
+    { "id": "batcher", "type": "backend", "label": "Batcher", "sublabel": "fixed-size groups", "pos": [260, 530], "size": [150, 64] },
+    { "id": "agent", "type": "backend", "label": "AgentHandler", "sublabel": "RetryPolicy", "pos": [750, 530], "size": [150, 64] },
+    { "id": "a2a", "type": "external", "label": "A2A Agent", "sublabel": "remote LLM service", "pos": [980, 530], "size": [160, 64] }
+  ],
+  "connections": [
+    { "id": "source-to-runner", "from": "source", "to": "runner", "label": "records" },
+    { "id": "runner-to-pipeline", "from": "runner", "to": "pipeline", "label": "process(msg)", "variant": "emphasis" },
+    { "id": "pipeline-to-sinks", "from": "pipeline", "to": "sinks", "label": "broadcast" },
+    { "id": "sinks-to-ext", "from": "sinks", "to": "extsinks", "label": "write" },
+    { "id": "monitor-to-pipeline", "from": "monitor", "to": "pipeline", "label": "Tick", "labelAt": [585, 217], "variant": "dashed" },
+    { "id": "pipeline-to-handlers", "from": "pipeline", "to": "handlers", "label": "route by type", "labelAt": [585, 447] },
+    { "id": "handlers-to-batcher", "from": "handlers", "to": "batcher", "label": "re-batch", "variant": "dashed" },
+    { "id": "handlers-to-agent", "from": "handlers", "to": "agent", "label": "agent step" },
+    { "id": "agent-to-a2a", "from": "agent", "to": "a2a", "label": "A2A call" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Ingest", "items": ["Sources yield records one at a time", "run() or PipelineService drives the Pipeline"] },
+    { "dot": "emerald", "title": "Process", "items": ["Pipeline routes each message by type and Stage", "Steps may fan out, batch, or call an A2A agent"] },
+    { "dot": "amber", "title": "Deliver", "items": ["Sinks receive matching messages by broadcast", "Parquet, Kafka, and DB sinks are optional extras"] }
+  ]
+}
